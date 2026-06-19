@@ -1,8 +1,9 @@
 """
-IGRIS AI Backend - Configuration Module v4.0 (Speed Optimized)
-=============================================================
+IGRIS AI Backend - Configuration Module v5.0 (Final)
+=====================================================
 
-Multi-API key rotation + async batching + model tiering for maximum speed.
+Multi-API key rotation + async batching + model tiering.
+Works with all Gemini API key formats including AQ-prefixed keys.
 
 Get your API keys at: https://aistudio.google.com/app/apikey
 """
@@ -10,56 +11,41 @@ Get your API keys at: https://aistudio.google.com/app/apikey
 import os
 
 # ---------------------------------------------------------------------------
-# GEMINI AI CONFIGURATION - MULTI-KEY + SPEED TIERING
+# GEMINI AI CONFIGURATION - MULTI-KEY ROTATION
 # ---------------------------------------------------------------------------
 
 # List of Google Gemini API keys for rotation.
-# Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches to the next.
-# Format: ["key1", "key2", "key3", "key4"]
+# Supports all formats: AIzaSy..., AQ..., etc.
+# Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
 # Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
 GEMINI_API_KEYS = [
-    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 1
-    "AQ.Ab8RN6J6-2LPqubmgLGektEXvFZtsdmPrid7hiw9UQIOJsUWdQ",  # Key 2
-    "AIzaSyCo11399qyXyN5aT5y4fazlbQEk9mIsAQI",  # Key 3
-    "AQ.Ab8RN6KpYQD0u2sOuQxk5459qWb2LJ45NX7FR0w0ImfvM5Zt2g",  # Key 4
+    "AQ.Ab8RN6JoAt3FOlAhDcHYeWs9sJuEwQKZnMD24IttrgOpKPiiuA",  # Key 1
+    "AQ.Ab8RN6KLVFj_giedIsslPhxBXXkBGm_v_n9cqGR1olEKRLNWTA",  # Key 2
+    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 3
+    "AQ.Ab8RN6Ldc4MWjDnY2E9BoiV_UgKUwfjJ4rVprOpBoJeUCDBwKw",  # Key 4
 ]
 
-# Set to "true" to force mock mode (no real AI calls, returns placeholder data).
-# Set to "false" to force live mode (requires valid GEMINI_API_KEYS).
-# Leave empty "" to auto-detect: mock mode if no keys, live if keys present.
+# Set to "true" to force mock mode (no real AI calls).
+# Set to "false" to force live mode.
+# Leave empty "" to auto-detect.
 MOCK_AI = ""
 
 # ---------------------------------------------------------------------------
-# SPEED TIER SYSTEM - Choose your tradeoff
+# SPEED TIER SYSTEM
 # ---------------------------------------------------------------------------
-#
-# TIER 1: "fastest"  - gemini-3-flash-preview (1-2s, good for images/docs)
-# TIER 2: "fast"     - gemini-2.5-flash (2-3s, slightly better quality)
-# TIER 3: "balanced" - gemini-3.5-flash (3-4s, best quality/speed ratio)
-# TIER 4: "quality"  - gemini-3.1-pro-preview (5-10s, max accuracy)
-#
-# SPEED_TIER auto-selects the model. Override with GEMINI_MODEL if needed.
-SPEED_TIER = "fastest"  # Options: "fastest", "fast", "balanced", "quality"
 
-# Override: Set a specific model to bypass tier system
-# Leave empty "" to use SPEED_TIER selection
+SPEED_TIER = "fastest"  # "fastest" | "fast" | "balanced" | "quality"
+
+# Override: Set specific model. Leave "" to use SPEED_TIER.
 GEMINI_MODEL = ""
 
 # ---------------------------------------------------------------------------
-# CONCURRENCY & BATCHING (Speed Multipliers)
+# CONCURRENCY & PERFORMANCE
 # ---------------------------------------------------------------------------
 
-# Number of files to process in parallel (batch uploads)
-# Higher = faster but more memory. Render free tier: keep at 3-5
 MAX_CONCURRENT_FILES = 5
-
-# Process archive files in parallel too?
 PARALLEL_ARCHIVE_PROCESSING = True
-
-# Timeout per AI call (seconds). Lower = faster fail + retry
 AI_TIMEOUT = 15
-
-# Retry failed keys immediately or skip to next?
 AGGRESSIVE_RETRY = True
 
 # ---------------------------------------------------------------------------
@@ -75,7 +61,7 @@ WORKERS = 1
 # File Processing Limits
 # ---------------------------------------------------------------------------
 
-MAX_FILE_SIZE = 100 * 1024 * 1024       # 100 MB
+MAX_FILE_SIZE = 100 * 1024 * 1024
 MAX_ARCHIVE_FILES = 100
 MAX_ARCHIVE_TOTAL_SIZE = 200 * 1024 * 1024
 MAX_TEXT_LENGTH = 30000
@@ -102,11 +88,10 @@ ENABLE_ARCHIVE_PROCESSING = True
 ENABLE_SECURITY_SCAN = True
 
 # ---------------------------------------------------------------------------
-# Internal: Resolve final values (env vars override file values)
+# Internal: Resolve config values (env vars override file values)
 # ---------------------------------------------------------------------------
 
 def _resolve(name, default, type_func=str):
-    """Resolve a config value: env var > file value > default."""
     env_val = os.getenv(name, "").strip()
     if env_val:
         if type_func == bool:
@@ -120,7 +105,6 @@ def _resolve(name, default, type_func=str):
     return file_val
 
 
-# Resolve env vars
 MOCK_AI_RAW = _resolve("MOCK_AI", MOCK_AI)
 SPEED_TIER = _resolve("SPEED_TIER", SPEED_TIER)
 GEMINI_MODEL_OVERRIDE = _resolve("GEMINI_MODEL", GEMINI_MODEL)
@@ -158,7 +142,6 @@ SPEED_TIER_MAP = {
     "quality": "gemini-3.1-pro-preview",
 }
 
-# Override takes precedence, then speed tier, then default
 if GEMINI_MODEL_OVERRIDE:
     GEMINI_MODEL = GEMINI_MODEL_OVERRIDE
 elif SPEED_TIER in SPEED_TIER_MAP:
@@ -167,23 +150,23 @@ else:
     GEMINI_MODEL = "gemini-3-flash-preview"
 
 # ---------------------------------------------------------------------------
-# Multi-Key Resolution & Rotation Logic
+# Multi-Key Resolution (FIXED: handles both list and string env vars)
 # ---------------------------------------------------------------------------
 
-# Get keys from env var (comma-separated) or file list
-_env_keys = _resolve("GEMINI_API_KEYS", "", str)
-if _env_keys:
-    GEMINI_API_KEYS = [k.strip() for k in _env_keys.split(",") if k.strip()]
+_env_keys_raw = os.getenv("GEMINI_API_KEYS", "").strip()
+if _env_keys_raw:
+    # Env var is a comma-separated string
+    GEMINI_API_KEYS = [k.strip() for k in _env_keys_raw.split(",") if k.strip()]
+# else: keep the list from file config
 
-# Filter out empty keys
+# Filter empty keys
 GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k.strip()]
 
-# Current active key index (rotates on rate limit)
+# Rotation state
 _current_key_index = 0
 
 
 def get_next_api_key():
-    """Get the next available API key (rotates on failure)."""
     global _current_key_index
     if not GEMINI_API_KEYS:
         return None
@@ -193,17 +176,16 @@ def get_next_api_key():
 
 
 def get_random_api_key():
-    """Get a random API key from the pool (for load distribution)."""
     import random
     if not GEMINI_API_KEYS:
         return None
     return random.choice(GEMINI_API_KEYS)
 
 
-# Backward compatibility: single key access
+# Backward compatibility
 GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
 
-# Final mock mode resolution
+# Mock mode resolution
 if MOCK_AI_RAW.lower() == "true":
     MOCK_AI = True
 elif MOCK_AI_RAW.lower() == "false":
