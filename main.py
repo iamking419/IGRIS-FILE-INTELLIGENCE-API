@@ -1,17 +1,18 @@
 """
-IGRIS AI Backend v6.0 (Groq Edition) - SUPER FAST File Intelligence
-====================================================================
+IGRIS AI Backend v6.1 (Groq + Gemini Edition) - SUPER FAST File Intelligence
+=============================================================================
 
 Features:
-  - Multi-API key rotation for Groq
+  - Groq: Multi-API key rotation for docs, code, archives, unknown files
+  - Gemini: Native vision for images (base64 multimodal input)
+  - Single /analyze endpoint — accepts 1 or multiple files (ChatGPT-style)
   - Async concurrent batch processing
   - Speed tier system
   - Parallel archive extraction
   - 100MB file limit
   - Rate limit aware retry with exponential backoff
-  - Groq chat completions API (OpenAI-compatible)
 
-Uses: groq SDK (pip install groq)
+Uses: groq SDK (pip install groq), google-genai (pip install google-genai)
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
@@ -47,8 +48,9 @@ logging.basicConfig(
 logger = logging.getLogger("igris")
 
 logger.info(
-    f"IGRIS v6.0 (Groq) | Model: {config.GROQ_MODEL} | "
-    f"Tier: {config.SPEED_TIER} | Keys: {len(config.GROQ_API_KEYS)} | "
+    f"IGRIS v6.1 (Groq+Gemini) | Groq Model: {config.GROQ_MODEL} | "
+    f"Gemini Vision: {config.GEMINI_VISION_MODEL} | "
+    f"Tier: {config.SPEED_TIER} | Groq Keys: {len(config.GROQ_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
 
@@ -134,6 +136,86 @@ def _get_client_key(client) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Gemini client for vision (images only) - NEW google-genai SDK
+# ---------------------------------------------------------------------------
+
+GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
+GEMINI_VISION_MODEL = "gemini-3.5-flash"
+
+_gemini_client: Any = None
+_gemini_lock = asyncio.Lock()
+
+
+async def get_gemini_client():
+    """Lazy-init Gemini client for vision tasks using NEW google-genai SDK."""
+    global _gemini_client
+    if config.MOCK_AI:
+        return None
+
+    if _gemini_client is not None:
+        return _gemini_client
+
+    async with _gemini_lock:
+        if _gemini_client is not None:
+            return _gemini_client
+        try:
+            from google import genai
+            client = genai.Client(api_key=GEMINI_API_KEY)
+            _gemini_client = client
+            logger.info("Initialized Gemini vision client (google-genai SDK)")
+            return client
+        except Exception as exc:
+            logger.error(f"Gemini client init failed: {exc}")
+            return None
+
+
+async def call_gemini_vision(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
+    """Call Gemini with actual image bytes for real vision analysis."""
+    client = await get_gemini_client()
+    if not client:
+        raise RuntimeError("Gemini client not available")
+
+    prompt_text = (
+        f"Analyze this image file named '{filename}'. "
+        "Provide a detailed analysis. Respond ONLY as JSON with these exact keys: "
+        "scene_description, objects_detected (array), text_ocr, "
+        "ui_interpretation, colors_dominant (array), composition, "
+        "mood_atmosphere, technical_quality, safety_flags (array). "
+        "No markdown, no preamble, just valid JSON."
+    )
+
+    try:
+        from google.genai import types
+
+        response = await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                _executor,
+                lambda: client.models.generate_content(
+                    model=GEMINI_VISION_MODEL,
+                    contents=[
+                        prompt_text,
+                        types.Part.from_bytes(data=raw, mime_type=mime_type),
+                    ],
+                    config=types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=4096,
+                    ),
+                )
+            ),
+            timeout=config.AI_TIMEOUT
+        )
+
+        parsed = _parse_json_response(response.text)
+        return parsed
+
+    except asyncio.TimeoutError:
+        raise RuntimeError("Gemini vision timeout")
+    except Exception as exc:
+        logger.error(f"Gemini vision error: {exc}")
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
 
@@ -189,8 +271,8 @@ class BatchAnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="SUPER FAST Unified File Intelligence API v6.0 (Groq)",
-    version="6.0.0",
+    description="SUPER FAST Unified File Intelligence API v6.1 (Groq + Gemini Vision)",
+    version="6.1.0",
 )
 
 app.add_middleware(
@@ -206,14 +288,16 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "6.0.0",
+        "version": "6.1.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
-        "model": config.GROQ_MODEL,
-        "api_keys_loaded": len(config.GROQ_API_KEYS),
-        "api_keys_failed": len(_failed_keys),
-        "api_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
+        "groq_model": config.GROQ_MODEL,
+        "gemini_vision_model": GEMINI_VISION_MODEL,
+        "groq_keys_loaded": len(config.GROQ_API_KEYS),
+        "groq_keys_failed": len(_failed_keys),
+        "groq_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
+        "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
     }
 
 
@@ -222,11 +306,12 @@ def health():
     return {
         "status": "ok",
         "mock_mode": config.MOCK_AI,
-        "model": config.GROQ_MODEL,
+        "groq_model": config.GROQ_MODEL,
+        "gemini_vision_model": GEMINI_VISION_MODEL,
         "tier": config.SPEED_TIER,
-        "api_keys_available": len(config.GROQ_API_KEYS),
-        "api_keys_failed": len(_failed_keys),
-        "api_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
+        "groq_keys_available": len(config.GROQ_API_KEYS),
+        "groq_keys_failed": len(_failed_keys),
+        "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
     }
 
 
@@ -384,7 +469,6 @@ async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: flo
                 timeout=config.AI_TIMEOUT
             )
 
-            # Success! Reset fail count for this key
             if key and key in _key_fail_counts:
                 _key_fail_counts[key] = max(0, _key_fail_counts[key] - 1)
 
@@ -399,7 +483,6 @@ async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: flo
             error_str = str(exc).lower()
             last_error = exc
 
-            # Categorize the error
             if "429" in error_str or "rate limit" in error_str:
                 logger.warning(f"Rate limit on key {key_id} - backing off")
                 if key:
@@ -456,7 +539,7 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
 
 
 def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Extract basic metadata from image bytes since Groq doesn't support vision."""
+    """Extract basic metadata from image bytes."""
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(raw))
@@ -473,12 +556,15 @@ def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
 
 
 def _image_to_base64(raw: bytes, mime_type: str) -> str:
-    """Convert image to base64 data URI for potential vision support."""
+    """Convert image to base64 data URI."""
     b64 = base64.b64encode(raw).decode("utf-8")
     return f"data:{mime_type};base64,{b64}"
 
 
+# ==================== GEMINI VISION IMAGE PIPELINE ====================
+
 async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
+    """Image pipeline: uses Gemini for real vision, falls back to Groq text-only if Gemini fails."""
     if config.MOCK_AI:
         return {
             "summary": "[MOCK] Image analyzed",
@@ -500,7 +586,39 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             }
         }
 
-    # Groq doesn't support vision. Extract metadata and describe textually.
+    # Try Gemini vision first
+    if GEMINI_API_KEY:
+        try:
+            parsed = await call_gemini_vision(filename, raw, mime_type)
+            logger.info(f"Gemini vision success for '{filename}'")
+
+            return {
+                "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
+                "description": parsed.get("scene_description", ""),
+                "key_points": [],
+                "objects": parsed.get("objects_detected", []),
+                "text": parsed.get("text_ocr", ""),
+                "insights": [
+                    f"UI: {parsed.get('ui_interpretation', 'N/A')}",
+                    f"Mood: {parsed.get('mood_atmosphere', 'N/A')}",
+                    f"Tech: {parsed.get('technical_quality', 'N/A')}",
+                ] if any([parsed.get("ui_interpretation"), parsed.get("mood_atmosphere"), parsed.get("technical_quality")]) else [],
+                "image_details": {
+                    "scene_description": parsed.get("scene_description", ""),
+                    "objects_detected": parsed.get("objects_detected", []),
+                    "text_ocr": parsed.get("text_ocr", ""),
+                    "ui_interpretation": parsed.get("ui_interpretation", ""),
+                    "colors_dominant": parsed.get("colors_dominant", []),
+                    "composition": parsed.get("composition", ""),
+                    "mood_atmosphere": parsed.get("mood_atmosphere", ""),
+                    "technical_quality": parsed.get("technical_quality", ""),
+                    "safety_flags": parsed.get("safety_flags", []),
+                },
+            }
+        except Exception as exc:
+            logger.warning(f"Gemini vision failed for '{filename}', falling back to Groq: {exc}")
+
+    # Fallback: Groq text-only (metadata-based)
     metadata = _get_image_metadata(raw, mime_type)
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
@@ -561,6 +679,8 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             "insights": parsed.get("insights", []),
         }
 
+
+# ==================== GROQ PIPELINES (UNCHANGED) ====================
 
 async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     extracted_text = extract_document_text(filename, raw)
@@ -828,21 +948,27 @@ async def analyze_single_file_limited(file: UploadFile) -> SingleAnalyzeResponse
 
 
 # ---------------------------------------------------------------------------
-# Endpoints
+# SINGLE ENDPOINT: /analyze (accepts 1 or multiple files)
 # ---------------------------------------------------------------------------
 
-@app.post("/analyze", response_model=SingleAnalyzeResponse)
-async def analyze(file: UploadFile = File(...)):
-    """Analyze a single file."""
-    response = await analyze_single_file(file)
-    return JSONResponse(content=response.model_dump())
-
-
-@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
-async def analyze_batch(files: List[UploadFile] = File(...)):
-    """Analyze multiple files concurrently."""
+@app.post("/analyze")
+async def analyze(files: List[UploadFile] = File(...)):
+    """
+    Analyze one or multiple files. Like ChatGPT's file picker.
+    - 1 file  -> returns SingleAnalyzeResponse
+    - 2+ files -> returns BatchAnalyzeResponse
+    """
     start = time.time()
 
+    if not files:
+        raise HTTPException(status_code=400, detail="No files provided")
+
+    # Single file: return direct response (backward compatible)
+    if len(files) == 1:
+        response = await analyze_single_file(files[0])
+        return JSONResponse(content=response.model_dump())
+
+    # Multiple files: batch processing
     tasks = [analyze_single_file_limited(file) for file in files]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -873,3 +999,13 @@ async def analyze_batch(files: List[UploadFile] = File(...)):
         failed=failed,
         total_time_ms=round(total_time, 2),
     ).model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Optional: keep /analyze/batch as alias (redirects to same logic)
+# ---------------------------------------------------------------------------
+
+@app.post("/analyze/batch")
+async def analyze_batch(files: List[UploadFile] = File(...)):
+    """Backward-compatible alias for /analyze with multiple files."""
+    return await analyze(files)
