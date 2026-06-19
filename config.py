@@ -1,18 +1,16 @@
 """
-IGRIS AI Backend - Configuration Module v3.0
-============================================
+IGRIS AI Backend - Configuration Module v4.0 (Speed Optimized)
+=============================================================
 
-Multi-API key rotation system for maximum uptime and speed.
-Keys are rotated automatically when rate limits are hit.
+Multi-API key rotation + async batching + model tiering for maximum speed.
 
 Get your API keys at: https://aistudio.google.com/app/apikey
 """
 
 import os
-import random
 
 # ---------------------------------------------------------------------------
-# GEMINI AI CONFIGURATION - MULTI-KEY ROTATION SYSTEM
+# GEMINI AI CONFIGURATION - MULTI-KEY + SPEED TIERING
 # ---------------------------------------------------------------------------
 
 # List of Google Gemini API keys for rotation.
@@ -20,11 +18,10 @@ import random
 # Format: ["key1", "key2", "key3", "key4"]
 # Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
 GEMINI_API_KEYS = [
-    "AIzaSyBh5vODoa8Nh1hhiUzSy3SB7SlGtDyDWzs",  # Key 1
-    "AIzaSyCdLDilDCRsEmOZf77fgBQ92O6STI9eSY4",  # Key 2
-    "AIzaSyBoA63GoECBNIizRE-1el3XQNZiIqcpW2g",  # Key 3
-    "AIzaSyD80E6_Q2D50mTwW_o3OEHVNnDEqwLGYMU",  # Key 4
-    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 5
+    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 1
+    "AQ.Ab8RN6J6-2LPqubmgLGektEXvFZtsdmPrid7hiw9UQIOJsUWdQ",  # Key 2
+    "AIzaSyCo11399qyXyN5aT5y4fazlbQEk9mIsAQI",  # Key 3
+    "AQ.Ab8RN6KpYQD0u2sOuQxk5459qWb2LJ45NX7FR0w0ImfvM5Zt2g",  # Key 4
 ]
 
 # Set to "true" to force mock mode (no real AI calls, returns placeholder data).
@@ -32,8 +29,38 @@ GEMINI_API_KEYS = [
 # Leave empty "" to auto-detect: mock mode if no keys, live if keys present.
 MOCK_AI = ""
 
-# Gemini model to use.
-GEMINI_MODEL = "gemini-3-flash-preview"
+# ---------------------------------------------------------------------------
+# SPEED TIER SYSTEM - Choose your tradeoff
+# ---------------------------------------------------------------------------
+#
+# TIER 1: "fastest"  - gemini-3-flash-preview (1-2s, good for images/docs)
+# TIER 2: "fast"     - gemini-2.5-flash (2-3s, slightly better quality)
+# TIER 3: "balanced" - gemini-3.5-flash (3-4s, best quality/speed ratio)
+# TIER 4: "quality"  - gemini-3.1-pro-preview (5-10s, max accuracy)
+#
+# SPEED_TIER auto-selects the model. Override with GEMINI_MODEL if needed.
+SPEED_TIER = "fastest"  # Options: "fastest", "fast", "balanced", "quality"
+
+# Override: Set a specific model to bypass tier system
+# Leave empty "" to use SPEED_TIER selection
+GEMINI_MODEL = ""
+
+# ---------------------------------------------------------------------------
+# CONCURRENCY & BATCHING (Speed Multipliers)
+# ---------------------------------------------------------------------------
+
+# Number of files to process in parallel (batch uploads)
+# Higher = faster but more memory. Render free tier: keep at 3-5
+MAX_CONCURRENT_FILES = 5
+
+# Process archive files in parallel too?
+PARALLEL_ARCHIVE_PROCESSING = True
+
+# Timeout per AI call (seconds). Lower = faster fail + retry
+AI_TIMEOUT = 15
+
+# Retry failed keys immediately or skip to next?
+AGGRESSIVE_RETRY = True
 
 # ---------------------------------------------------------------------------
 # Server Configuration
@@ -95,7 +122,8 @@ def _resolve(name, default, type_func=str):
 
 # Resolve env vars
 MOCK_AI_RAW = _resolve("MOCK_AI", MOCK_AI)
-GEMINI_MODEL = _resolve("GEMINI_MODEL", GEMINI_MODEL)
+SPEED_TIER = _resolve("SPEED_TIER", SPEED_TIER)
+GEMINI_MODEL_OVERRIDE = _resolve("GEMINI_MODEL", GEMINI_MODEL)
 HOST = _resolve("HOST", HOST)
 PORT = _resolve("PORT", PORT, int)
 RELOAD = _resolve("RELOAD", RELOAD, bool)
@@ -105,6 +133,10 @@ MAX_ARCHIVE_FILES = _resolve("MAX_ARCHIVE_FILES", MAX_ARCHIVE_FILES, int)
 MAX_ARCHIVE_TOTAL_SIZE = _resolve("MAX_ARCHIVE_TOTAL_SIZE", MAX_ARCHIVE_TOTAL_SIZE, int)
 MAX_TEXT_LENGTH = _resolve("MAX_TEXT_LENGTH", MAX_TEXT_LENGTH, int)
 MAX_IMAGE_DIMENSION = _resolve("MAX_IMAGE_DIMENSION", MAX_IMAGE_DIMENSION, int)
+MAX_CONCURRENT_FILES = _resolve("MAX_CONCURRENT_FILES", MAX_CONCURRENT_FILES, int)
+AI_TIMEOUT = _resolve("AI_TIMEOUT", AI_TIMEOUT, int)
+PARALLEL_ARCHIVE_PROCESSING = _resolve("PARALLEL_ARCHIVE_PROCESSING", PARALLEL_ARCHIVE_PROCESSING, bool)
+AGGRESSIVE_RETRY = _resolve("AGGRESSIVE_RETRY", AGGRESSIVE_RETRY, bool)
 LOG_LEVEL = _resolve("LOG_LEVEL", LOG_LEVEL)
 LOG_FORMAT = _resolve("LOG_FORMAT", LOG_FORMAT)
 CORS_ORIGINS = _resolve("CORS_ORIGINS", CORS_ORIGINS, list)
@@ -114,6 +146,25 @@ CORS_ALLOW_HEADERS = _resolve("CORS_ALLOW_HEADERS", CORS_ALLOW_HEADERS, list)
 ENABLE_DETAILED_IMAGE_ANALYSIS = _resolve("ENABLE_DETAILED_IMAGE_ANALYSIS", ENABLE_DETAILED_IMAGE_ANALYSIS, bool)
 ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE_PROCESSING, bool)
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
+
+# ---------------------------------------------------------------------------
+# Speed Tier Model Selection
+# ---------------------------------------------------------------------------
+
+SPEED_TIER_MAP = {
+    "fastest": "gemini-3-flash-preview",
+    "fast": "gemini-2.5-flash",
+    "balanced": "gemini-3.5-flash",
+    "quality": "gemini-3.1-pro-preview",
+}
+
+# Override takes precedence, then speed tier, then default
+if GEMINI_MODEL_OVERRIDE:
+    GEMINI_MODEL = GEMINI_MODEL_OVERRIDE
+elif SPEED_TIER in SPEED_TIER_MAP:
+    GEMINI_MODEL = SPEED_TIER_MAP[SPEED_TIER]
+else:
+    GEMINI_MODEL = "gemini-3-flash-preview"
 
 # ---------------------------------------------------------------------------
 # Multi-Key Resolution & Rotation Logic
@@ -143,6 +194,7 @@ def get_next_api_key():
 
 def get_random_api_key():
     """Get a random API key from the pool (for load distribution)."""
+    import random
     if not GEMINI_API_KEYS:
         return None
     return random.choice(GEMINI_API_KEYS)
