@@ -1,6 +1,6 @@
 """
-IGRIS AI Backend v5.0 (Final) - SUPER FAST File Intelligence
-=============================================================
+IGRIS AI Backend v5.1 (Fixed for google-genai SDK)
+===================================================
 
 Features:
   - Multi-API key rotation (supports all key formats: AIzaSy, AQ, etc.)
@@ -10,6 +10,7 @@ Features:
   - 100MB file limit
   - Production-ready error handling
 
+Uses: google-genai SDK (pip install google-genai)
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
@@ -44,7 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger("igris")
 
 logger.info(
-    f"IGRIS v5.0 | Model: {config.GEMINI_MODEL} | "
+    f"IGRIS v5.1 | Model: {config.GEMINI_MODEL} | "
     f"Tier: {config.SPEED_TIER} | Keys: {len(config.GEMINI_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
@@ -56,7 +57,7 @@ logger.info(
 _executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_FILES)
 
 # ---------------------------------------------------------------------------
-# Gemini client with multi-key rotation
+# Gemini client with multi-key rotation  -- FIXED: Proper google-genai usage
 # ---------------------------------------------------------------------------
 
 _gemini_clients = {}
@@ -69,6 +70,7 @@ def _get_key_id(api_key: str) -> str:
 
 
 async def get_gemini_client(force_new: bool = False):
+    """Get a working Gemini client with key rotation using google-genai SDK."""
     if config.MOCK_AI:
         return None
     if not config.GEMINI_API_KEYS:
@@ -90,6 +92,7 @@ async def get_gemini_client(force_new: bool = False):
                 return _gemini_clients[key]
 
             try:
+                # FIXED: Use google.genai (the new SDK) correctly
                 from google import genai
                 client = genai.Client(api_key=key)
                 _gemini_clients[key] = client
@@ -172,8 +175,8 @@ class BatchAnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="SUPER FAST Unified File Intelligence API v5.0",
-    version="5.0.0",
+    description="SUPER FAST Unified File Intelligence API v5.1",
+    version="5.1.0",
 )
 
 app.add_middleware(
@@ -189,7 +192,7 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "5.0.0",
+        "version": "5.1.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
@@ -344,10 +347,11 @@ async def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini AI call with retry + rotation + timeout
+# Gemini AI call with retry + rotation + timeout  -- FIXED: Correct API usage
 # ---------------------------------------------------------------------------
 
 async def _call_gemini_with_retry(contents) -> Any:
+    """Call Gemini with retry and key rotation using google-genai SDK."""
     last_error = None
     max_retries = len(config.GEMINI_API_KEYS) if config.GEMINI_API_KEYS else 1
 
@@ -358,14 +362,17 @@ async def _call_gemini_with_retry(contents) -> Any:
             key = _get_client_key(client)
 
             loop = asyncio.get_event_loop()
+
+            # FIXED: Use the correct google-genai API
+            def _generate():
+                response = client.models.generate_content(
+                    model=config.GEMINI_MODEL,
+                    contents=contents,
+                )
+                return response
+
             response = await asyncio.wait_for(
-                loop.run_in_executor(
-                    _executor,
-                    lambda: client.models.generate_content(
-                        model=config.GEMINI_MODEL,
-                        contents=contents,
-                    )
-                ),
+                loop.run_in_executor(_executor, _generate),
                 timeout=config.AI_TIMEOUT
             )
             return response
@@ -451,6 +458,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             "text (string), insights (array). No markdown."
         )
 
+    # FIXED: Use the correct types import for google-genai
     from google.genai import types
     response = await _call_gemini_with_retry([
         types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
