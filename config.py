@@ -17,7 +17,7 @@ import os
 # Your Google Gemini API key.
 # Get one free at: https://aistudio.google.com/app/apikey
 # Paste the full key string below - do NOT include quotes if using env vars.
-GEMINI_API_KEY = "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w"
+GEMINI_API_KEY = "AIzaSyBh5vODoa8Nh1hhiUzSy3SB7SlGtDyDWzs"
 
 # Set to "true" to force mock mode (no real AI calls, returns placeholder data).
 # Set to "false" to force live mode (requires valid GEMINI_API_KEY).
