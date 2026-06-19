@@ -1,11 +1,12 @@
 """
-IGRIS AI Backend - Configuration Module v6.0 (Groq Edition)
-===========================================================
+IGRIS AI Backend - Configuration Module v6.0 (Groq + Gemini Edition)
+====================================================================
 
 Multi-API key rotation + async batching + model tiering.
-Works with Groq API keys from console.groq.com
+Groq for text/docs/code. Gemini for vision/images.
 
-Get your API keys at: https://console.groq.com/keys
+Get Groq keys: https://console.groq.com/keys
+Get Gemini key: https://aistudio.google.com/app/apikey
 """
 
 import os
@@ -14,37 +15,40 @@ import os
 # GROQ AI CONFIGURATION - MULTI-KEY ROTATION
 # ---------------------------------------------------------------------------
 
-# List of Groq API keys for rotation.
-# Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
-# Leave empty [] to use env var GROQ_API_KEYS (comma-separated)
 GROQ_API_KEYS = [
-    "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",  # Key 1
-    "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",  # Key 2
-    "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",  # Key 3
-    "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",  # Key 4
+    "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",
+    "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",
+    "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",
+    "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",
 ]
 
-# Set to "true" to force mock mode (no real AI calls).
-# Set to "false" to force live mode.
-# Leave empty "" to auto-detect.
 MOCK_AI = ""
+
+# ---------------------------------------------------------------------------
+# GEMINI AI CONFIGURATION - VISION ONLY
+# ---------------------------------------------------------------------------
+
+# Your Gemini API key for image/vision analysis
+GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
+
+# Gemini vision model (native multimodal - can see images)
+GEMINI_VISION_MODEL = "gemini-3.5-flash"
 
 # ---------------------------------------------------------------------------
 # SPEED TIER SYSTEM
 # ---------------------------------------------------------------------------
 
-SPEED_TIER = "fastest"  # "fastest" | "fast" | "balanced" | "quality"
+SPEED_TIER = "fastest"
 
-# Override: Set specific model. Leave "" to use SPEED_TIER.
 GROQ_MODEL = ""
 
 # ---------------------------------------------------------------------------
 # CONCURRENCY & PERFORMANCE
 # ---------------------------------------------------------------------------
 
-MAX_CONCURRENT_FILES = 3        # Keep low to respect Groq rate limits
-AI_TIMEOUT = 30                 # Seconds per API call
-AGGRESSIVE_RETRY = False        # Don't burn rate limits
+MAX_CONCURRENT_FILES = 3
+AI_TIMEOUT = 30
+AGGRESSIVE_RETRY = False
 
 # ---------------------------------------------------------------------------
 # Server Configuration
@@ -128,16 +132,19 @@ ENABLE_DETAILED_IMAGE_ANALYSIS = _resolve("ENABLE_DETAILED_IMAGE_ANALYSIS", ENAB
 ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE_PROCESSING, bool)
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
 
+# Resolve Gemini config
+GEMINI_API_KEY = _resolve("GEMINI_API_KEY", GEMINI_API_KEY)
+GEMINI_VISION_MODEL = _resolve("GEMINI_VISION_MODEL", GEMINI_VISION_MODEL)
+
 # ---------------------------------------------------------------------------
 # Speed Tier Model Selection - Groq Models
 # ---------------------------------------------------------------------------
 
-# Groq model IDs from console.groq.com/docs/models
 SPEED_TIER_MAP = {
-    "fastest": "meta-llama/llama-4-scout-17b-16e-instruct",   # 750 TPS, cheapest
-    "fast": "meta-llama/llama-4-scout-17b-16e-instruct",      # Fast
-    "balanced": "llama-3.3-70b-versatile",                    # Balanced
-    "quality": "qwen/qwen3-32b",                              # Best quality
+    "fastest": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "fast": "meta-llama/llama-4-scout-17b-16e-instruct",
+    "balanced": "llama-3.3-70b-versatile",
+    "quality": "qwen/qwen3-32b",
 }
 
 if GROQ_MODEL_OVERRIDE:
@@ -155,10 +162,8 @@ _env_keys_raw = os.getenv("GROQ_API_KEYS", "").strip()
 if _env_keys_raw:
     GROQ_API_KEYS = [k.strip() for k in _env_keys_raw.split(",") if k.strip()]
 
-# Filter empty keys
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k.strip()]
 
-# Rotation state
 _current_key_index = 0
 
 
@@ -178,7 +183,6 @@ def get_random_api_key():
     return random.choice(GROQ_API_KEYS)
 
 
-# Backward compatibility
 GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else ""
 
 # Mock mode resolution
@@ -189,9 +193,16 @@ elif MOCK_AI_RAW.lower() == "false":
 else:
     MOCK_AI = not bool(GROQ_API_KEYS)
 
-# Validate
+# Validate Groq
 if not MOCK_AI and not GROQ_API_KEYS:
     raise RuntimeError(
         "MOCK_AI is disabled but no GROQ_API_KEYS are set. "
         "Either add keys to GROQ_API_KEYS in config.py or set MOCK_AI='true'."
+    )
+
+# Validate Gemini (warn only - images will fallback to Groq text-only if no Gemini key)
+if not GEMINI_API_KEY and not MOCK_AI:
+    import logging
+    logging.getLogger("igris").warning(
+        "No GEMINI_API_KEY set. Image analysis will fall back to Groq text-only mode."
     )
