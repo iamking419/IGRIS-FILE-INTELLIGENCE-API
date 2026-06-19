@@ -119,7 +119,7 @@ class AnalyzeResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="IGRIS FILE INTELLIGENCE API",
+    title="IGRIS AI Backend",
     description="Unified File Intelligence API — upload anything, get structured AI analysis.",
     version="2.0.0",
 )
@@ -224,7 +224,8 @@ def extract_text_from_docx(raw: bytes) -> str:
 
     try:
         document = docx.Document(io.BytesIO(raw))
-        return "\n".join(p.text for p in document.paragraphs)
+        return "
+".join(p.text for p in document.paragraphs)
     except Exception as exc:
         logger.warning(f"DOCX extraction failed: {exc}")
         return ""
@@ -392,37 +393,61 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         prompt = (
             "You are an expert computer vision analyst. Analyze this image in extreme detail. "
-            "Provide a comprehensive analysis covering ALL of the following aspects:\n\n"
+            "Provide a comprehensive analysis covering ALL of the following aspects:
+
+"
             "1. SCENE DESCRIPTION: A vivid, detailed paragraph describing what is happening in the image, "
-            "including setting, context, and any narrative elements.\n"
+            "including setting, context, and any narrative elements.
+"
             "2. OBJECTS DETECTED: A comprehensive list of ALL distinct physical objects, people, animals, "
-            "vehicles, buildings, furniture, tools, devices, clothing items, food, plants, etc. Be exhaustive.\n"
+            "vehicles, buildings, furniture, tools, devices, clothing items, food, plants, etc. Be exhaustive.
+"
             "3. TEXT (OCR): ALL visible text in the image — signs, labels, UI text, handwriting, logos, "
-            "watermarks, timestamps, captions, URLs, phone numbers, etc. Preserve line breaks.\n"
+            "watermarks, timestamps, captions, URLs, phone numbers, etc. Preserve line breaks.
+"
             "4. UI/APP INTERPRETATION: If this is a screenshot or UI image, describe the interface in detail: "
             "what app/website it is, what page/screen, what buttons/fields are present, what the user flow appears to be, "
-            "design system used (Material, iOS, etc.), and any visible data/state. If not a UI, say 'Not a UI screenshot.'\n"
-            "5. DOMINANT COLORS: List the 3-5 most prominent colors as hex codes.\n"
+            "design system used (Material, iOS, etc.), and any visible data/state. If not a UI, say 'Not a UI screenshot.'
+"
+            "5. DOMINANT COLORS: List the 3-5 most prominent colors as hex codes.
+"
             "6. COMPOSITION: Describe the visual layout — rule of thirds, symmetry, focal points, "
-            "depth of field, perspective, framing, leading lines, etc.\n"
+            "depth of field, perspective, framing, leading lines, etc.
+"
             "7. MOOD & ATMOSPHERE: The emotional tone — cheerful, somber, tense, peaceful, chaotic, "
-            "professional, casual, luxurious, minimalist, etc. Explain why.\n"
+            "professional, casual, luxurious, minimalist, etc. Explain why.
+"
             "8. TECHNICAL QUALITY: Resolution estimate, lighting quality, focus sharpness, "
-            "noise/grain, compression artifacts, exposure, color balance, camera angle.\n"
+            "noise/grain, compression artifacts, exposure, color balance, camera angle.
+"
             "9. SAFETY FLAGS: Any content that may be sensitive — violence, nudity, hate symbols, "
-            "drug paraphernalia, self-harm, etc. List specifically what was detected. Empty array if none.\n\n"
-            "Respond ONLY as JSON with this exact structure:\n"
-            "{\n"
-            '  "scene_description": "string",\n'
-            '  "objects_detected": ["string", "string"],\n'
-            '  "text_ocr": "string",\n'
-            '  "ui_interpretation": "string",\n'
-            '  "colors_dominant": ["#RRGGBB"],\n'
-            '  "composition": "string",\n'
-            '  "mood_atmosphere": "string",\n'
-            '  "technical_quality": "string",\n'
-            '  "safety_flags": ["string"]\n'
-            "}\n"
+            "drug paraphernalia, self-harm, etc. List specifically what was detected. Empty array if none.
+
+"
+            "Respond ONLY as JSON with this exact structure:
+"
+            "{
+"
+            '  "scene_description": "string",
+'
+            '  "objects_detected": ["string", "string"],
+'
+            '  "text_ocr": "string",
+'
+            '  "ui_interpretation": "string",
+'
+            '  "colors_dominant": ["#RRGGBB"],
+'
+            '  "composition": "string",
+'
+            '  "mood_atmosphere": "string",
+'
+            '  "technical_quality": "string",
+'
+            '  "safety_flags": ["string"]
+'
+            "}
+"
             "No markdown, no preamble, no explanation outside the JSON."
         )
     else:
@@ -505,8 +530,11 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         "You will be given the extracted text of a document. Provide: "
         "(1) a concise summary, (2) a list of key points, (3) any notable insights. "
         "Respond ONLY as JSON with keys: summary, key_points (array of strings), "
-        "insights (array of strings). No markdown, no preamble.\n\n"
-        f"DOCUMENT TEXT:\n{extracted_text[:config.MAX_TEXT_LENGTH]}"
+        "insights (array of strings). No markdown, no preamble.
+
+"
+        f"DOCUMENT TEXT:
+{extracted_text[:config.MAX_TEXT_LENGTH]}"
     )
 
     response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -545,8 +573,11 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "(3) a list of security issues found, (4) a list of suggested improvements. "
             "Respond ONLY as JSON with keys: summary, bugs (array of strings), "
             "security_issues (array of strings), improvements (array of strings). "
-            "No markdown, no preamble.\n\n"
-            f"CODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
+            "No markdown, no preamble.
+
+"
+            f"CODE:
+{code_text[:config.MAX_TEXT_LENGTH]}"
         )
     else:
         prompt = (
@@ -554,8 +585,11 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "(1) a concise summary of what the code does, (2) a list of bugs found, "
             "(3) a list of suggested improvements. "
             "Respond ONLY as JSON with keys: summary, bugs (array of strings), "
-            "improvements (array of strings). No markdown, no preamble.\n\n"
-            f"CODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
+            "improvements (array of strings). No markdown, no preamble.
+
+"
+            f"CODE:
+{code_text[:config.MAX_TEXT_LENGTH]}"
         )
 
     response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -632,7 +666,8 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         if count > 0:
             summary_parts.append(f"  - {count} {ftype} file(s)")
 
-    archive_summary = "\n".join(summary_parts)
+    archive_summary = "
+".join(summary_parts)
 
     if not config.MOCK_AI and total_files > 0:
         try:
@@ -640,20 +675,33 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             archive_overview = []
             for item in archive_analyses[:20]:
                 archive_overview.append(
-                    f"File: {item['filename']} ({item['file_type']})\n"
+                    f"File: {item['filename']} ({item['file_type']})
+"
                     f"Summary: {item['analysis'].get('summary', 'N/A')[:200]}"
                 )
 
             prompt = (
                 "You are analyzing a ZIP archive containing multiple files. "
-                "Based on the following file summaries, provide an overall assessment:\n\n"
-                "1. What is the likely purpose of this archive?\n"
-                "2. Are there any patterns or relationships between the files?\n"
-                "3. Any security concerns or red flags?\n"
-                "4. Suggested next steps for the user.\n\n"
+                "Based on the following file summaries, provide an overall assessment:
+
+"
+                "1. What is the likely purpose of this archive?
+"
+                "2. Are there any patterns or relationships between the files?
+"
+                "3. Any security concerns or red flags?
+"
+                "4. Suggested next steps for the user.
+
+"
                 "Respond ONLY as JSON with keys: purpose, patterns, security_concerns, next_steps. "
-                "No markdown, no preamble.\n\n"
-                f"ARCHIVE CONTENTS:\n{'\n---\n'.join(archive_overview)}"
+                "No markdown, no preamble.
+
+"
+                f"ARCHIVE CONTENTS:
+{'
+---
+'.join(archive_overview)}"
             )
 
             response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -664,7 +712,10 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 f"Patterns: {parsed.get('patterns', 'None detected')} | "
                 f"Security: {parsed.get('security_concerns', 'None')}"
             )
-            archive_summary += f"\n\nAI Assessment:\n{ai_summary}"
+            archive_summary += f"
+
+AI Assessment:
+{ai_summary}"
 
         except Exception as exc:
             logger.warning(f"Archive AI summary failed: {exc}")
