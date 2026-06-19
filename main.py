@@ -5,8 +5,7 @@ IGRIS AI Backend v6.1 (Groq + Gemini Edition) - SUPER FAST File Intelligence
 Features:
   - Groq: Multi-API key rotation for docs, code, archives, unknown files
   - Gemini: Native vision for images ONLY (base64 multimodal input)
-  - Single /analyze endpoint — accepts 1 or multiple files (ChatGPT-style)
-  - Proper file upload widgets in Swagger UI
+  - Single /analyze endpoint — accepts ONE file upload
   - Async concurrent batch processing
   - Speed tier system
   - Parallel archive extraction
@@ -31,7 +30,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -262,14 +261,6 @@ class SingleAnalyzeResponse(BaseModel):
     summary: str
     analysis: AnalysisBlock
     meta: MetaBlock
-
-
-class BatchAnalyzeResponse(BaseModel):
-    results: List[SingleAnalyzeResponse]
-    total_files: int
-    successful: int
-    failed: int
-    total_time_ms: float
 
 
 # ---------------------------------------------------------------------------
@@ -971,37 +962,21 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
 
 # ---------------------------------------------------------------------------
-# Semaphore for concurrent control
-# ---------------------------------------------------------------------------
-
-_analysis_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_FILES)
-
-
-async def analyze_single_file_limited(file: UploadFile) -> SingleAnalyzeResponse:
-    async with _analysis_semaphore:
-        return await analyze_single_file(file)
-
-
-# ---------------------------------------------------------------------------
-# SINGLE ENDPOINT: /analyze (accepts 1 or multiple files)
+# SINGLE FILE ENDPOINT: /analyze (ONE file only)
 # 
-# FIX: Proper file upload handling for Swagger UI
-# The files parameter uses File() with proper multipart typing so Swagger
-# shows actual file pickers instead of string text boxes.
+# Uses UploadFile (not List[UploadFile]) so Swagger shows a single
+# proper file picker instead of array<string> text boxes.
 # ---------------------------------------------------------------------------
 
-@app.post("/analyze")
+@app.post("/analyze", response_model=SingleAnalyzeResponse)
 async def analyze(
-    files: List[UploadFile] = File(
+    file: UploadFile = File(
         ...,
-        description="Upload one or multiple files to analyze. Supports images, documents, code, and archives.",
+        description="Upload a single file to analyze. Supports images, documents, code, and archives.",
     )
 ):
     """
-    Analyze one or multiple files. Like ChatGPT's file picker.
-
-    - Upload 1 file  -> returns SingleAnalyzeResponse
-    - Upload 2+ files -> returns BatchAnalyzeResponse
+    Analyze a single file.
 
     Supported file types:
     - **Images**: .jpg, .jpeg, .png, .webp, .gif, .bmp, .tiff, .ico (uses Gemini vision)
@@ -1009,59 +984,5 @@ async def analyze(
     - **Code**: .py, .js, .html, .css, .java, .cpp, .go, .rs, and 100+ more (uses Groq)
     - **Archives**: .zip (extracts and analyzes contents, uses Groq + Gemini for inner images)
     """
-    start = time.time()
-
-    if not files:
-        raise HTTPException(status_code=400, detail="No files provided")
-
-    # Single file: return direct response (backward compatible)
-    if len(files) == 1:
-        response = await analyze_single_file(files[0])
-        return JSONResponse(content=response.model_dump())
-
-    # Multiple files: batch processing
-    tasks = [analyze_single_file_limited(file) for file in files]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    processed = []
-    successful = 0
-    failed = 0
-
-    for i, result in enumerate(results):
-        if isinstance(result, Exception):
-            failed += 1
-            fname = files[i].filename if i < len(files) else "unknown"
-            processed.append(SingleAnalyzeResponse(
-                file_type="error",
-                summary=f"Error: {str(result)}",
-                analysis=AnalysisBlock(insights=[f"Failed: {str(result)}"]),
-                meta=MetaBlock(filename=fname, size=0, mime_type="error"),
-            ))
-        else:
-            successful += 1
-            processed.append(result)
-
-    total_time = (time.time() - start) * 1000
-
-    return JSONResponse(content=BatchAnalyzeResponse(
-        results=processed,
-        total_files=len(files),
-        successful=successful,
-        failed=failed,
-        total_time_ms=round(total_time, 2),
-    ).model_dump())
-
-
-# ---------------------------------------------------------------------------
-# Optional: keep /analyze/batch as alias (redirects to same logic)
-# ---------------------------------------------------------------------------
-
-@app.post("/analyze/batch")
-async def analyze_batch(
-    files: List[UploadFile] = File(
-        ...,
-        description="Upload multiple files to analyze in batch.",
-    )
-):
-    """Backward-compatible alias for /analyze with multiple files."""
-    return await analyze(files)
+    response = await analyze_single_file(file)
+    return JSONResponse(content=response.model_dump())
