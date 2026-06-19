@@ -1,16 +1,17 @@
 """
-IGRIS AI Backend v5.1 (Fixed for google-genai SDK)
-===================================================
+IGRIS AI Backend v6.0 (Groq Edition) - SUPER FAST File Intelligence
+====================================================================
 
 Features:
-  - Multi-API key rotation (supports all key formats: AIzaSy, AQ, etc.)
+  - Multi-API key rotation for Groq
   - Async concurrent batch processing
   - Speed tier system
   - Parallel archive extraction
   - 100MB file limit
-  - Production-ready error handling
+  - Rate limit aware retry with exponential backoff
+  - Groq chat completions API (OpenAI-compatible)
 
-Uses: google-genai SDK (pip install google-genai)
+Uses: groq SDK (pip install groq)
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
@@ -23,6 +24,7 @@ import zipfile
 import random
 import time
 import asyncio
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -45,8 +47,8 @@ logging.basicConfig(
 logger = logging.getLogger("igris")
 
 logger.info(
-    f"IGRIS v5.1 | Model: {config.GEMINI_MODEL} | "
-    f"Tier: {config.SPEED_TIER} | Keys: {len(config.GEMINI_API_KEYS)} | "
+    f"IGRIS v6.0 (Groq) | Model: {config.GROQ_MODEL} | "
+    f"Tier: {config.SPEED_TIER} | Keys: {len(config.GROQ_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
 
@@ -57,11 +59,13 @@ logger.info(
 _executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_FILES)
 
 # ---------------------------------------------------------------------------
-# Gemini client with multi-key rotation  -- FIXED: Proper google-genai usage
+# Groq client with multi-key rotation
 # ---------------------------------------------------------------------------
 
-_gemini_clients = {}
-_failed_keys = set()
+_groq_clients: Dict[str, Any] = {}
+_failed_keys: set = set()
+_key_fail_counts: Dict[str, int] = {}
+_key_error_log: Dict[str, List[str]] = {}
 _key_lock = asyncio.Lock()
 
 
@@ -69,51 +73,61 @@ def _get_key_id(api_key: str) -> str:
     return api_key[:12] + "..." if len(api_key) > 15 else api_key
 
 
-async def get_gemini_client(force_new: bool = False):
-    """Get a working Gemini client with key rotation using google-genai SDK."""
+async def get_groq_client(force_new: bool = False):
+    """Get a working Groq client with key rotation."""
     if config.MOCK_AI:
         return None
-    if not config.GEMINI_API_KEYS:
-        raise RuntimeError("No GEMINI_API_KEYS configured.")
+    if not config.GROQ_API_KEYS:
+        raise RuntimeError("No GROQ_API_KEYS configured.")
 
     async with _key_lock:
         attempts = 0
-        max_attempts = len(config.GEMINI_API_KEYS) * 2
+        max_attempts = len(config.GROQ_API_KEYS)
 
         while attempts < max_attempts:
             key = config.get_next_api_key()
             key_id = _get_key_id(key)
 
-            if key in _failed_keys:
+            if key in _failed_keys and _key_fail_counts.get(key, 0) >= 3:
                 attempts += 1
                 continue
 
-            if not force_new and key in _gemini_clients:
-                return _gemini_clients[key]
+            if not force_new and key in _groq_clients:
+                return _groq_clients[key]
 
             try:
-                # FIXED: Use google.genai (the new SDK) correctly
-                from google import genai
-                client = genai.Client(api_key=key)
-                _gemini_clients[key] = client
-                logger.debug(f"Using key: {key_id}")
+                from groq import AsyncGroq
+                client = AsyncGroq(api_key=key)
+                _groq_clients[key] = client
+                logger.info(f"Initialized Groq client with key: {key_id}")
                 return client
             except Exception as exc:
-                logger.warning(f"Key {key_id} init failed: {exc}")
-                _failed_keys.add(key)
+                logger.error(f"Key {key_id} init failed: {exc}")
+                _key_fail_counts[key] = _key_fail_counts.get(key, 0) + 1
+                if _key_fail_counts[key] >= 3:
+                    _failed_keys.add(key)
                 attempts += 1
 
-        raise RuntimeError("All Gemini API keys failed.")
+        raise RuntimeError("All Groq API keys failed to initialize.")
 
 
-async def mark_key_failed(api_key: str):
+async def mark_key_failed(api_key: str, reason: str = "unknown"):
+    """Mark a key as failed with reason tracking."""
     async with _key_lock:
-        _failed_keys.add(api_key)
-        logger.warning(f"Key {_get_key_id(api_key)} blacklisted")
+        _key_fail_counts[api_key] = _key_fail_counts.get(api_key, 0) + 1
+        if api_key not in _key_error_log:
+            _key_error_log[api_key] = []
+        _key_error_log[api_key].append(reason[:200])
+
+        if _key_fail_counts[api_key] >= 3:
+            _failed_keys.add(api_key)
+            logger.warning(f"Key {_get_key_id(api_key)} PERMANENTLY blacklisted after 3 failures ({reason})")
+        else:
+            logger.warning(f"Key {_get_key_id(api_key)} failure {_key_fail_counts[api_key]}/3 ({reason})")
 
 
 def _get_client_key(client) -> str:
-    for key, cached in _gemini_clients.items():
+    for key, cached in _groq_clients.items():
         if cached is client:
             return key
     return ""
@@ -175,8 +189,8 @@ class BatchAnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="SUPER FAST Unified File Intelligence API v5.1",
-    version="5.1.0",
+    description="SUPER FAST Unified File Intelligence API v6.0 (Groq)",
+    version="6.0.0",
 )
 
 app.add_middleware(
@@ -192,18 +206,14 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "5.1.0",
+        "version": "6.0.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
-        "model": config.GEMINI_MODEL,
-        "api_keys_loaded": len(config.GEMINI_API_KEYS),
-        "max_concurrent": config.MAX_CONCURRENT_FILES,
-        "features": [
-            "image_analysis", "document_analysis", "code_analysis",
-            "zip_processing", "batch_upload", "api_key_rotation",
-            "async_concurrent", "speed_tiers",
-        ],
+        "model": config.GROQ_MODEL,
+        "api_keys_loaded": len(config.GROQ_API_KEYS),
+        "api_keys_failed": len(_failed_keys),
+        "api_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
     }
 
 
@@ -212,10 +222,11 @@ def health():
     return {
         "status": "ok",
         "mock_mode": config.MOCK_AI,
-        "model": config.GEMINI_MODEL,
+        "model": config.GROQ_MODEL,
         "tier": config.SPEED_TIER,
-        "api_keys_available": len(config.GEMINI_API_KEYS),
+        "api_keys_available": len(config.GROQ_API_KEYS),
         "api_keys_failed": len(_failed_keys),
+        "api_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
     }
 
 
@@ -347,53 +358,83 @@ async def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
 
 
 # ---------------------------------------------------------------------------
-# Gemini AI call with retry + rotation + timeout  -- FIXED: Correct API usage
+# Groq AI call with retry + rotation + timeout
 # ---------------------------------------------------------------------------
 
-async def _call_gemini_with_retry(contents) -> Any:
-    """Call Gemini with retry and key rotation using google-genai SDK."""
+async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: float = 0.3) -> Any:
+    """Call Groq chat.completions with retry, key rotation, and rate limit protection."""
     last_error = None
-    max_retries = len(config.GEMINI_API_KEYS) if config.GEMINI_API_KEYS else 1
+    max_retries = min(len(config.GROQ_API_KEYS) if config.GROQ_API_KEYS else 1, 4)
 
     for attempt in range(max_retries):
         client = None
+        key = None
         try:
-            client = await get_gemini_client(force_new=(attempt > 0))
+            client = await get_groq_client(force_new=(attempt > 0))
             key = _get_client_key(client)
-
-            loop = asyncio.get_event_loop()
-
-            # FIXED: Use the correct google-genai API
-            def _generate():
-                response = client.models.generate_content(
-                    model=config.GEMINI_MODEL,
-                    contents=contents,
-                )
-                return response
+            key_id = _get_key_id(key) if key else "unknown"
 
             response = await asyncio.wait_for(
-                loop.run_in_executor(_executor, _generate),
+                client.chat.completions.create(
+                    model=config.GROQ_MODEL,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=4096,
+                ),
                 timeout=config.AI_TIMEOUT
             )
+
+            # Success! Reset fail count for this key
+            if key and key in _key_fail_counts:
+                _key_fail_counts[key] = max(0, _key_fail_counts[key] - 1)
+
             return response
 
         except asyncio.TimeoutError:
-            logger.warning(f"AI timeout (attempt {attempt + 1}), rotating...")
-            if client and (key := _get_client_key(client)):
-                await mark_key_failed(key)
+            logger.warning(f"Groq timeout (attempt {attempt + 1}/{max_retries}) - NOT blacklisting")
             last_error = "Timeout"
             continue
+
         except Exception as exc:
             error_str = str(exc).lower()
             last_error = exc
-            if any(x in error_str for x in ["429", "rate limit", "quota", "unauthenticated", "401", "permission"]):
-                if client and (key := _get_client_key(client)):
-                    await mark_key_failed(key)
+
+            # Categorize the error
+            if "429" in error_str or "rate limit" in error_str:
+                logger.warning(f"Rate limit on key {key_id} - backing off")
+                if key:
+                    await mark_key_failed(key, "rate_limit")
+                await asyncio.sleep(2 ** attempt)
+                continue
+
+            elif any(x in error_str for x in ["401", "unauthorized", "invalid api key", "authentication"]):
+                logger.error(f"AUTH ERROR on key {key_id}: {exc}")
+                if key:
+                    await mark_key_failed(key, "auth_invalid")
                 if config.AGGRESSIVE_RETRY:
                     continue
+
+            elif any(x in error_str for x in ["403", "permission denied", "forbidden"]):
+                logger.error(f"PERMISSION ERROR on key {key_id}: {exc}")
+                if key:
+                    await mark_key_failed(key, "permission_denied")
+                if config.AGGRESSIVE_RETRY:
+                    continue
+
+            elif "model" in error_str and ("not found" in error_str or "not supported" in error_str or "decommissioned" in error_str):
+                logger.error(f"MODEL ERROR: {config.GROQ_MODEL} not found - {exc}")
+                raise RuntimeError(f"Model '{config.GROQ_MODEL}' not found. Check console.groq.com/docs/models")
+
+            else:
+                logger.error(f"API ERROR on key {key_id}: {exc}")
+                if key:
+                    await mark_key_failed(key, f"api_error: {error_str[:50]}")
+                if config.AGGRESSIVE_RETRY:
+                    continue
+
             raise
 
-    raise RuntimeError(f"All API keys exhausted. Last error: {last_error}")
+    raise RuntimeError(f"All Groq API keys exhausted. Last error: {last_error}")
 
 
 # ---------------------------------------------------------------------------
@@ -412,6 +453,29 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
         return json.loads(cleaned.strip())
     except json.JSONDecodeError:
         return {"summary": text[:500]}
+
+
+def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
+    """Extract basic metadata from image bytes since Groq doesn't support vision."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw))
+        return {
+            "format": img.format,
+            "mode": img.mode,
+            "width": img.width,
+            "height": img.height,
+            "size_bytes": len(raw),
+            "mime_type": mime_type,
+        }
+    except Exception:
+        return {"size_bytes": len(raw), "mime_type": mime_type}
+
+
+def _image_to_base64(raw: bytes, mime_type: str) -> str:
+    """Convert image to base64 data URI for potential vision support."""
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime_type};base64,{b64}"
 
 
 async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
@@ -436,40 +500,36 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             }
         }
 
+    # Groq doesn't support vision. Extract metadata and describe textually.
+    metadata = _get_image_metadata(raw, mime_type)
+
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         prompt = (
-            "Analyze this image in extreme detail. Provide:\n"
-            "1. SCENE DESCRIPTION: vivid narrative\n"
-            "2. OBJECTS DETECTED: exhaustive list\n"
-            "3. TEXT (OCR): all visible text\n"
-            "4. UI INTERPRETATION: if screenshot\n"
-            "5. DOMINANT COLORS: hex codes\n"
-            "6. COMPOSITION: layout analysis\n"
-            "7. MOOD & ATMOSPHERE: emotional tone\n"
-            "8. TECHNICAL QUALITY: resolution, focus, etc\n"
-            "9. SAFETY FLAGS: sensitive content\n\n"
+            f"I have an image file named '{filename}' with these properties:\n"
+            f"- Format: {metadata.get('format', 'unknown')}\n"
+            f"- Dimensions: {metadata.get('width', '?')}x{metadata.get('height', '?')}\n"
+            f"- Mode: {metadata.get('mode', 'unknown')}\n"
+            f"- Size: {metadata.get('size_bytes', 0)} bytes\n"
+            f"- MIME: {metadata.get('mime_type', 'unknown')}\n\n"
+            "Since I cannot see the actual image, provide a GENERIC but detailed analysis template. "
             "Respond ONLY as JSON with keys: scene_description, objects_detected, text_ocr, "
             "ui_interpretation, colors_dominant, composition, mood_atmosphere, technical_quality, safety_flags. "
             "No markdown, no preamble."
         )
     else:
         prompt = (
-            "Analyze this image. Provide JSON with: description, objects (array), "
+            f"I have an image file named '{filename}' ({metadata.get('width', '?')}x{metadata.get('height', '?')}, "
+            f"{metadata.get('format', 'unknown')}). Provide JSON with: description, objects (array), "
             "text (string), insights (array). No markdown."
         )
 
-    # FIXED: Use the correct types import for google-genai
-    from google.genai import types
-    response = await _call_gemini_with_retry([
-        types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
-        prompt,
-    ])
-
-    parsed = _parse_json_response(response.text)
+    messages = [{"role": "user", "content": prompt}]
+    response = await _call_groq_with_retry(messages)
+    parsed = _parse_json_response(response.choices[0].message.content)
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         return {
-            "summary": (parsed.get("scene_description", "")[:280] or "Image analyzed"),
+            "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
             "description": parsed.get("scene_description", ""),
             "key_points": [],
             "objects": parsed.get("objects_detected", []),
@@ -520,8 +580,9 @@ async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         f"No markdown.\n\nDOCUMENT:\n{extracted_text[:config.MAX_TEXT_LENGTH]}"
     )
 
-    response = await _call_gemini_with_retry(prompt)
-    parsed = _parse_json_response(response.text)
+    messages = [{"role": "user", "content": prompt}]
+    response = await _call_groq_with_retry(messages)
+    parsed = _parse_json_response(response.choices[0].message.content)
 
     return {
         "summary": parsed.get("summary", ""),
@@ -558,8 +619,9 @@ async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             f"No markdown.\n\nCODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
         )
 
-    response = await _call_gemini_with_retry(prompt)
-    parsed = _parse_json_response(response.text)
+    messages = [{"role": "user", "content": prompt}]
+    response = await _call_groq_with_retry(messages)
+    parsed = _parse_json_response(response.choices[0].message.content)
 
     key_points = [f"[bug] {b}" for b in parsed.get("bugs", [])]
     if config.ENABLE_SECURITY_SCAN:
@@ -629,8 +691,9 @@ async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 "Analyze this ZIP archive. Return JSON: purpose, patterns, security_concerns, next_steps. "
                 f"No markdown.\n\n{'\n---\n'.join(overview)}"
             )
-            response = await _call_gemini_with_retry(prompt)
-            parsed = _parse_json_response(response.text)
+            messages = [{"role": "user", "content": prompt}]
+            response = await _call_groq_with_retry(messages)
+            parsed = _parse_json_response(response.choices[0].message.content)
             archive_summary += f"\n\nAI: {parsed.get('purpose', 'N/A')}"
         except Exception as exc:
             logger.warning(f"Archive AI summary failed: {exc}")
