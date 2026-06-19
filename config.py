@@ -19,10 +19,10 @@ import os
 # Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
 # Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
 GEMINI_API_KEYS = [
-    "AQ.Ab8RN6KLVFj_giedIsslPhxBXXkBGm_v_n9cqGR1olEKRLNWTA",  # Key 1
-    "AQ.Ab8RN6LQOpcKS2uqt6bGqKuNmLUpRWEqkprfkzNOMJH60A1iKA",  # Key 2
-    "AQ.Ab8RN6IWlTOvqVmeo_ptyQ540oODEymByu7MSmXD6j9MGFGqHg",  # Key 3
-    "AQ.Ab8RN6LJfMpgxQvjadoe1vY3LQHCghBLOgaqjG4SCtuQ7gkKSQ",  # Key 4
+    "AQ.Ab8RN6JtlidJO2_gwSSj2-wLyE-dZ-GHJV7h038_b4LBFcohTA",  # Key 1
+    "AQ.Ab8RN6IqCvcWKT5n3qQd_VWlFAAF9NYaMpoLLK8MSKDfqem11w",  # Key 2
+    "AQ.Ab8RN6JxYC0nSYPsswOqzm5Mj9DK_AY-6hPCehwmrp2HHD2uQQ",  # Key 3
+    "AQ.Ab8RN6Lu2FpFK-XpAoii5MiOiyI-QHsAvYNHURXSYJPyLVJ4lw",  # Key 4
 ]
 
 # Set to "true" to force mock mode (no real AI calls).
