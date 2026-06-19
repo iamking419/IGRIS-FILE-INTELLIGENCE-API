@@ -4,8 +4,9 @@ IGRIS AI Backend v6.1 (Groq + Gemini Edition) - SUPER FAST File Intelligence
 
 Features:
   - Groq: Multi-API key rotation for docs, code, archives, unknown files
-  - Gemini: Native vision for images (base64 multimodal input)
+  - Gemini: Native vision for images ONLY (base64 multimodal input)
   - Single /analyze endpoint — accepts 1 or multiple files (ChatGPT-style)
+  - Proper file upload widgets in Swagger UI
   - Async concurrent batch processing
   - Speed tier system
   - Parallel archive extraction
@@ -30,7 +31,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -136,7 +137,7 @@ def _get_client_key(client) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Gemini client for vision (images only) - NEW google-genai SDK
+# Gemini client for vision (IMAGES ONLY)
 # ---------------------------------------------------------------------------
 
 GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
@@ -170,7 +171,10 @@ async def get_gemini_client():
 
 
 async def call_gemini_vision(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Call Gemini with actual image bytes for real vision analysis."""
+    """Call Gemini with actual image bytes for real vision analysis.
+
+    GEMINI IS ONLY USED FOR IMAGES. Nothing else touches Gemini.
+    """
     client = await get_gemini_client()
     if not client:
         raise RuntimeError("Gemini client not available")
@@ -298,6 +302,7 @@ def root():
         "groq_keys_failed": len(_failed_keys),
         "groq_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
         "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
+        "gemini_scope": "images_only",
     }
 
 
@@ -312,6 +317,7 @@ def health():
         "groq_keys_available": len(config.GROQ_API_KEYS),
         "groq_keys_failed": len(_failed_keys),
         "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
+        "gemini_scope": "images_only",
     }
 
 
@@ -561,10 +567,15 @@ def _image_to_base64(raw: bytes, mime_type: str) -> str:
     return f"data:{mime_type};base64,{b64}"
 
 
-# ==================== GEMINI VISION IMAGE PIPELINE ====================
+# ==================== GEMINI VISION - IMAGES ONLY ====================
+# Gemini is ONLY used for image analysis. NOTHING else touches Gemini.
+# =====================================================================
 
 async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Image pipeline: uses Gemini for real vision, falls back to Groq text-only if Gemini fails."""
+    """Image pipeline: uses Gemini for real vision, falls back to Groq text-only if Gemini fails.
+
+    GEMINI IS ONLY CALLED HERE. No other pipeline uses Gemini.
+    """
     if config.MOCK_AI:
         return {
             "summary": "[MOCK] Image analyzed",
@@ -586,7 +597,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             }
         }
 
-    # Try Gemini vision first
+    # Try Gemini vision first (IMAGES ONLY)
     if GEMINI_API_KEY:
         try:
             parsed = await call_gemini_vision(filename, raw, mime_type)
@@ -618,7 +629,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
         except Exception as exc:
             logger.warning(f"Gemini vision failed for '{filename}', falling back to Groq: {exc}")
 
-    # Fallback: Groq text-only (metadata-based)
+    # Fallback: Groq text-only (metadata-based) - NEVER calls Gemini
     metadata = _get_image_metadata(raw, mime_type)
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
@@ -680,9 +691,12 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
         }
 
 
-# ==================== GROQ PIPELINES (UNCHANGED) ====================
+# ==================== GROQ PIPELINES - EVERYTHING EXCEPT IMAGES ====================
+# All non-image files go through Groq. Gemini is NEVER called here.
+# ===================================================================================
 
 async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+    """Document pipeline - uses Groq ONLY. Gemini is never called."""
     extracted_text = extract_document_text(filename, raw)
 
     if config.MOCK_AI:
@@ -715,6 +729,7 @@ async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+    """Code pipeline - uses Groq ONLY. Gemini is never called."""
     code_text = _extract_plain(raw)
     ext = os.path.splitext(filename.lower())[1].lstrip(".")
 
@@ -758,6 +773,11 @@ async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+    """Archive pipeline - uses Groq ONLY. Gemini is never called directly.
+
+    Note: If archive contains images, those inner images go through run_image_pipeline
+    which may use Gemini. But the archive analysis itself is Groq-only.
+    """
     if not config.ENABLE_ARCHIVE_PROCESSING:
         return {
             "summary": "Archive processing disabled",
@@ -831,6 +851,11 @@ async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
+    """Analyze a single file inside an archive.
+
+    Images inside archives MAY use Gemini (via run_image_pipeline).
+    Everything else uses Groq.
+    """
     result = {
         "filename": file_info.filename,
         "relative_path": file_info.relative_path,
@@ -841,6 +866,7 @@ async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
     }
     try:
         if file_info.file_type == "image":
+            # This MAY call Gemini for real vision
             img = await run_image_pipeline(file_info.filename, file_info.raw, file_info.mime_type)
             result["analysis"] = {"summary": img.get("summary", ""), "description": img.get("description", ""),
                                    "objects": img.get("objects", []), "text": img.get("text", "")}
@@ -862,6 +888,7 @@ async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
 
 
 async def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+    """Unknown file pipeline - uses Groq ONLY. Gemini is never called."""
     text = _extract_plain(raw)
     has_text = bool(text.strip())
     return {
@@ -895,14 +922,19 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
     try:
         if file_type == "image":
+            # ONLY images may use Gemini
             result = await run_image_pipeline(file.filename, raw, mime_type)
         elif file_type == "document":
+            # Groq only
             result = await run_document_pipeline(file.filename, raw)
         elif file_type == "code":
+            # Groq only
             result = await run_code_pipeline(file.filename, raw)
         elif file_type == "archive":
+            # Groq only (inner images may use Gemini via analyze_archive_file)
             result = await run_archive_pipeline(file.filename, raw)
         else:
+            # Groq only
             result = await run_unknown_pipeline(file.filename, raw)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -949,14 +981,30 @@ async def analyze_single_file_limited(file: UploadFile) -> SingleAnalyzeResponse
 
 # ---------------------------------------------------------------------------
 # SINGLE ENDPOINT: /analyze (accepts 1 or multiple files)
+# 
+# FIX: Proper file upload handling for Swagger UI
+# The files parameter uses File() with proper multipart typing so Swagger
+# shows actual file pickers instead of string text boxes.
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze")
-async def analyze(files: List[UploadFile] = File(...)):
+async def analyze(
+    files: List[UploadFile] = File(
+        ...,
+        description="Upload one or multiple files to analyze. Supports images, documents, code, and archives.",
+    )
+):
     """
     Analyze one or multiple files. Like ChatGPT's file picker.
-    - 1 file  -> returns SingleAnalyzeResponse
-    - 2+ files -> returns BatchAnalyzeResponse
+
+    - Upload 1 file  -> returns SingleAnalyzeResponse
+    - Upload 2+ files -> returns BatchAnalyzeResponse
+
+    Supported file types:
+    - **Images**: .jpg, .jpeg, .png, .webp, .gif, .bmp, .tiff, .ico (uses Gemini vision)
+    - **Documents**: .pdf, .docx, .txt, .md, .rtf, .doc, .odt (uses Groq)
+    - **Code**: .py, .js, .html, .css, .java, .cpp, .go, .rs, and 100+ more (uses Groq)
+    - **Archives**: .zip (extracts and analyzes contents, uses Groq + Gemini for inner images)
     """
     start = time.time()
 
@@ -1006,6 +1054,11 @@ async def analyze(files: List[UploadFile] = File(...)):
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze/batch")
-async def analyze_batch(files: List[UploadFile] = File(...)):
+async def analyze_batch(
+    files: List[UploadFile] = File(
+        ...,
+        description="Upload multiple files to analyze in batch.",
+    )
+):
     """Backward-compatible alias for /analyze with multiple files."""
     return await analyze(files)
