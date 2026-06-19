@@ -1,12 +1,13 @@
 """
-IGRIS AI Backend - Unified File Intelligence API v2.1
+IGRIS AI Backend - Unified File Intelligence API v3.0
 =====================================================
 
 Single endpoint (POST /analyze) that accepts ANY file(s), detects type,
 routes to the correct AI pipeline, and returns structured JSON analysis.
 
 Features:
-  - Multi-file upload support (batch processing)
+  - Multi-API key rotation (3-4 keys, auto-failover on rate limit)
+  - Multi-file batch upload support
   - 100MB file size limit
   - ZIP archive recursive processing
   - Enhanced image analysis with 9-field deep analysis
@@ -24,10 +25,12 @@ import json
 import logging
 import mimetypes
 import zipfile
+import random
+import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from fastapi import FastAPI, File, UploadFile, HTTPException, Form
+from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -45,34 +48,78 @@ logging.basicConfig(
 )
 logger = logging.getLogger("igris")
 
-logger.info(f"Startup config -> MOCK_AI={config.MOCK_AI} | GEMINI_MODEL={config.GEMINI_MODEL}")
+logger.info(f"Startup config -> MOCK_AI={config.MOCK_AI} | GEMINI_MODEL={config.GEMINI_MODEL} | Keys={len(config.GEMINI_API_KEYS)}")
 
 # ---------------------------------------------------------------------------
-# Gemini client (lazy import so the app still runs without the SDK installed
-# while in mock mode)
+# Gemini client with multi-key rotation
 # ---------------------------------------------------------------------------
 
-_gemini_client = None
+_gemini_clients = {}  # Cache clients per key
+_failed_keys = set()   # Track temporarily failed keys
 
 
-def get_gemini_client():
-    """Lazily construct and cache the Gemini client. Only called in live mode."""
-    global _gemini_client
-    if _gemini_client is not None:
-        return _gemini_client
+def _get_key_id(api_key: str) -> str:
+    """Generate a short ID for an API key (for logging)."""
+    return api_key[:8] + "..." if len(api_key) > 10 else api_key
 
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise RuntimeError(
-            "google-genai SDK is not installed. Run `pip install google-genai`."
-        ) from exc
 
-    if not config.GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set but MOCK_AI is false.")
+def get_gemini_client(force_new: bool = False):
+    """
+    Get a working Gemini client with automatic key rotation.
 
-    _gemini_client = genai.Client(api_key=config.GEMINI_API_KEY)
-    return _gemini_client
+    Tries keys in rotation until one works. Failed keys are temporarily
+    blacklisted to avoid hammering rate-limited keys.
+    """
+    if config.MOCK_AI:
+        return None
+
+    if not config.GEMINI_API_KEYS:
+        raise RuntimeError("No GEMINI_API_KEYS configured.")
+
+    # Try each key, skipping recently failed ones
+    attempts = 0
+    max_attempts = len(config.GEMINI_API_KEYS) * 2
+
+    while attempts < max_attempts:
+        key = config.get_next_api_key()
+        key_id = _get_key_id(key)
+
+        if key in _failed_keys:
+            attempts += 1
+            continue
+
+        # Return cached client if available
+        if not force_new and key in _gemini_clients:
+            return _gemini_clients[key]
+
+        try:
+            from google import genai
+            client = genai.Client(api_key=key)
+            _gemini_clients[key] = client
+            logger.info(f"Using Gemini key: {key_id}")
+            return client
+        except Exception as exc:
+            logger.warning(f"Key {key_id} failed to initialize: {exc}")
+            _failed_keys.add(key)
+            attempts += 1
+
+    # All keys failed
+    raise RuntimeError("All Gemini API keys failed. Check your keys or wait for rate limits to reset.")
+
+
+def mark_key_failed(api_key: str):
+    """Mark a key as temporarily failed (rate limited)."""
+    _failed_keys.add(api_key)
+    key_id = _get_key_id(api_key)
+    logger.warning(f"Key {key_id} marked as failed (rate limit). Will retry others.")
+
+
+def _get_client_key(client) -> str:
+    """Find the API key associated with a cached client."""
+    for key, cached_client in _gemini_clients.items():
+        if cached_client is client:
+            return key
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +177,7 @@ class BatchAnalyzeResponse(BaseModel):
 app = FastAPI(
     title="IGRIS AI Backend",
     description="Unified File Intelligence API - upload anything, get structured AI analysis.",
-    version="2.1.0",
+    version="3.0.0",
 )
 
 app.add_middleware(
@@ -146,24 +193,32 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "2.1.0",
+        "version": "3.0.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "model": config.GEMINI_MODEL,
+        "api_keys_loaded": len(config.GEMINI_API_KEYS),
         "features": [
             "image_analysis",
             "document_analysis",
             "code_analysis",
             "zip_processing",
             "batch_upload",
+            "api_key_rotation",
         ],
-        "endpoints": ["POST /analyze (single or batch)", "GET /health"],
+        "endpoints": ["POST /analyze (single)", "POST /analyze/batch (multi)", "GET /health"],
     }
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "mock_mode": config.MOCK_AI, "model": config.GEMINI_MODEL}
+    return {
+        "status": "ok",
+        "mock_mode": config.MOCK_AI,
+        "model": config.GEMINI_MODEL,
+        "api_keys_available": len(config.GEMINI_API_KEYS),
+        "api_keys_failed": len(_failed_keys),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -283,13 +338,11 @@ def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
                 if info.is_dir():
                     continue
 
-                # Skip macOS metadata files and hidden files
                 if info.filename.startswith("__MACOSX/") or os.path.basename(info.filename).startswith("."):
                     continue
 
-                # Check limits
                 if len(extracted) >= config.MAX_ARCHIVE_FILES:
-                    logger.warning(f"Archive exceeds max file limit ({config.MAX_ARCHIVE_FILES}), skipping remaining files")
+                    logger.warning(f"Archive exceeds max file limit ({config.MAX_ARCHIVE_FILES})")
                     break
 
                 try:
@@ -297,7 +350,7 @@ def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
                     total_size += len(file_raw)
 
                     if total_size > config.MAX_ARCHIVE_TOTAL_SIZE:
-                        logger.warning(f"Archive exceeds max total size ({config.MAX_ARCHIVE_TOTAL_SIZE} bytes), stopping extraction")
+                        logger.warning(f"Archive exceeds max total size")
                         break
 
                     mime = mimetypes.guess_type(info.filename)[0] or "application/octet-stream"
@@ -315,10 +368,8 @@ def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
                     logger.warning(f"Failed to extract {info.filename}: {exc}")
 
     except zipfile.BadZipFile:
-        logger.error("Invalid ZIP file format")
         raise HTTPException(status_code=400, detail="Invalid ZIP file format")
     except Exception as exc:
-        logger.error(f"ZIP extraction error: {exc}")
         raise HTTPException(status_code=500, detail=f"ZIP extraction failed: {exc}")
 
     return extracted
@@ -372,8 +423,53 @@ def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# AI Pipelines
+# AI Pipelines with retry & key rotation
 # ---------------------------------------------------------------------------
+
+def _call_gemini_with_retry(contents, prompt_text: str = "") -> Any:
+    """
+    Call Gemini with automatic key rotation on rate limit (429) or auth errors.
+    Retries up to all available keys before giving up.
+    """
+    last_error = None
+    max_retries = len(config.GEMINI_API_KEYS) if config.GEMINI_API_KEYS else 1
+
+    for attempt in range(max_retries):
+        client = None
+        try:
+            client = get_gemini_client(force_new=(attempt > 0))
+            key = _get_client_key(client)
+
+            if isinstance(contents, list):
+                response = client.models.generate_content(
+                    model=config.GEMINI_MODEL,
+                    contents=contents,
+                )
+            else:
+                response = client.models.generate_content(
+                    model=config.GEMINI_MODEL,
+                    contents=[contents],
+                )
+            return response
+
+        except Exception as exc:
+            error_str = str(exc).lower()
+            last_error = exc
+
+            # Check if it's a rate limit or auth error
+            if any(x in error_str for x in ["429", "rate limit", "quota", "unauthenticated", "401"]):
+                if client and key:
+                    mark_key_failed(key)
+                logger.warning(f"Key failed (attempt {attempt + 1}/{max_retries}), rotating...")
+                time.sleep(0.5)  # Brief delay before retry
+                continue
+            else:
+                # Non-rate-limit error, don't retry
+                raise
+
+    # All keys exhausted
+    raise RuntimeError(f"All API keys exhausted. Last error: {last_error}")
+
 
 def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
     if config.MOCK_AI:
@@ -396,8 +492,6 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
                 "safety_flags": [],
             }
         }
-
-    client = get_gemini_client()
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         prompt = (
@@ -447,13 +541,10 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
 
     from google.genai import types
 
-    response = client.models.generate_content(
-        model=config.GEMINI_MODEL,
-        contents=[
-            types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
-            prompt,
-        ],
-    )
+    response = _call_gemini_with_retry([
+        types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
+        prompt,
+    ])
 
     parsed = _parse_json_response(response.text)
 
@@ -510,7 +601,6 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "insights": ["[MOCK] This document appears to discuss placeholder topics."],
         }
 
-    client = get_gemini_client()
     prompt = (
         "You will be given the extracted text of a document. Provide: "
         "(1) a concise summary, (2) a list of key points, (3) any notable insights. "
@@ -519,7 +609,7 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         f"DOCUMENT TEXT:\n{extracted_text[:config.MAX_TEXT_LENGTH]}"
     )
 
-    response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
+    response = _call_gemini_with_retry(prompt)
     parsed = _parse_json_response(response.text)
 
     return {
@@ -546,8 +636,6 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "insights": ["[MOCK] Consider adding more comments (placeholder insight)."],
         }
 
-    client = get_gemini_client()
-
     if config.ENABLE_SECURITY_SCAN:
         prompt = (
             f"You will be given source code (detected extension: .{ext}). Provide: "
@@ -568,7 +656,7 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             f"CODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
         )
 
-    response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
+    response = _call_gemini_with_retry(prompt)
     parsed = _parse_json_response(response.text)
 
     key_points = [f"[bug] {b}" for b in parsed.get("bugs", [])]
@@ -586,7 +674,6 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
-    """Process a ZIP archive: extract all files, analyze each one, return aggregated results."""
     if not config.ENABLE_ARCHIVE_PROCESSING:
         return {
             "summary": "Archive processing is disabled in config.",
@@ -646,7 +733,6 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
     if not config.MOCK_AI and total_files > 0:
         try:
-            client = get_gemini_client()
             archive_overview = []
             for item in archive_analyses[:20]:
                 archive_overview.append(
@@ -666,7 +752,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 f"ARCHIVE CONTENTS:\n{'\n---\n'.join(archive_overview)}"
             )
 
-            response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
+            response = _call_gemini_with_retry(prompt)
             parsed = _parse_json_response(response.text)
 
             ai_summary = (
@@ -822,7 +908,7 @@ async def analyze_batch(files: List[UploadFile] = File(...)):
     """
     Analyze multiple files in a single request.
 
-    Each file is processed independently and results are returned as a batch.
+    Each file is processed independently with API key rotation.
     If one file fails, the others still process.
     """
     results = []
