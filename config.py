@@ -1,6 +1,6 @@
 """
-IGRIS AI Backend - Configuration Module v6.2 (Groq + Vision URL Support)
-==========================================================================
+IGRIS AI Backend - Configuration Module v6.0 (Groq Edition)
+===========================================================
 
 Multi-API key rotation + async batching + model tiering.
 Works with Groq API keys from console.groq.com
@@ -14,6 +14,9 @@ import os
 # GROQ AI CONFIGURATION - MULTI-KEY ROTATION
 # ---------------------------------------------------------------------------
 
+# List of Groq API keys for rotation.
+# Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
+# Leave empty [] to use env var GROQ_API_KEYS (comma-separated)
 GROQ_API_KEYS = [
     "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",  # Key 1
     "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",  # Key 2
@@ -39,9 +42,9 @@ GROQ_MODEL = ""
 # CONCURRENCY & PERFORMANCE
 # ---------------------------------------------------------------------------
 
-MAX_CONCURRENT_FILES = 3
-AI_TIMEOUT = 30
-AGGRESSIVE_RETRY = False
+MAX_CONCURRENT_FILES = 3        # Keep low to respect Groq rate limits
+AI_TIMEOUT = 30                 # Seconds per API call
+AGGRESSIVE_RETRY = False        # Don't burn rate limits
 
 # ---------------------------------------------------------------------------
 # Server Configuration
@@ -129,11 +132,12 @@ ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bo
 # Speed Tier Model Selection - Groq Models
 # ---------------------------------------------------------------------------
 
+# Groq model IDs from console.groq.com/docs/models
 SPEED_TIER_MAP = {
-    "fastest": "meta-llama/llama-4-scout-17b-16e-instruct",
-    "fast": "meta-llama/llama-4-scout-17b-16e-instruct",
-    "balanced": "llama-3.3-70b-versatile",
-    "quality": "qwen/qwen3-32b",
+    "fastest": "meta-llama/llama-4-scout-17b-16e-instruct",   # 750 TPS, cheapest
+    "fast": "meta-llama/llama-4-scout-17b-16e-instruct",      # Fast
+    "balanced": "llama-3.3-70b-versatile",                    # Balanced
+    "quality": "qwen/qwen3-32b",                              # Best quality
 }
 
 if GROQ_MODEL_OVERRIDE:
@@ -151,8 +155,10 @@ _env_keys_raw = os.getenv("GROQ_API_KEYS", "").strip()
 if _env_keys_raw:
     GROQ_API_KEYS = [k.strip() for k in _env_keys_raw.split(",") if k.strip()]
 
+# Filter empty keys
 GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k.strip()]
 
+# Rotation state
 _current_key_index = 0
 
 
@@ -172,8 +178,10 @@ def get_random_api_key():
     return random.choice(GROQ_API_KEYS)
 
 
+# Backward compatibility
 GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else ""
 
+# Mock mode resolution
 if MOCK_AI_RAW.lower() == "true":
     MOCK_AI = True
 elif MOCK_AI_RAW.lower() == "false":
@@ -181,6 +189,7 @@ elif MOCK_AI_RAW.lower() == "false":
 else:
     MOCK_AI = not bool(GROQ_API_KEYS)
 
+# Validate
 if not MOCK_AI and not GROQ_API_KEYS:
     raise RuntimeError(
         "MOCK_AI is disabled but no GROQ_API_KEYS are set. "
