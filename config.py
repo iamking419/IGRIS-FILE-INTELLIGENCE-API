@@ -20,10 +20,11 @@ import random
 # Format: ["key1", "key2", "key3", "key4"]
 # Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
 GEMINI_API_KEYS = [
-    "",  # Key 1
-    "",  # Key 2
-    "",  # Key 3
-    "",  # Key 4
+    "AIzaSyBh5vODoa8Nh1hhiUzSy3SB7SlGtDyDWzs",  # Key 1
+    "AIzaSyCdLDilDCRsEmOZf77fgBQ92O6STI9eSY4",  # Key 2
+    "AIzaSyBoA63GoECBNIizRE-1el3XQNZiIqcpW2g",  # Key 3
+    "AIzaSyD80E6_Q2D50mTwW_o3OEHVNnDEqwLGYMU",  # Key 4
+    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 5
 ]
 
 # Set to "true" to force mock mode (no real AI calls, returns placeholder data).
