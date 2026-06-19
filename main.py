@@ -1,19 +1,16 @@
 """
-IGRIS AI Backend - Unified File Intelligence API v4.0 (SUPER FAST)
-==================================================================
+IGRIS AI Backend v5.0 (Final) - SUPER FAST File Intelligence
+=============================================================
 
-Optimized for speed with:
-  - Async concurrent file processing
-  - Multi-API key rotation with aggressive retry
-  - Speed tier system (fastest/balanced/quality)
+Features:
+  - Multi-API key rotation (supports all key formats: AIzaSy, AQ, etc.)
+  - Async concurrent batch processing
+  - Speed tier system
   - Parallel archive extraction
-  - Connection pooling
   - 100MB file limit
-  - Batch upload with concurrency
+  - Production-ready error handling
 
-Run locally:
-    pip install -r requirements.txt
-    uvicorn main:app --reload --port 8000
+Run: uvicorn main:app --host 0.0.0.0 --port 8000
 """
 
 import os
@@ -46,16 +43,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger("igris")
 
-logger.info(f"IGRIS v4.0 | Model: {config.GEMINI_MODEL} | Tier: {config.SPEED_TIER} | Keys: {len(config.GEMINI_API_KEYS)} | Concurrent: {config.MAX_CONCURRENT_FILES}")
+logger.info(
+    f"IGRIS v5.0 | Model: {config.GEMINI_MODEL} | "
+    f"Tier: {config.SPEED_TIER} | Keys: {len(config.GEMINI_API_KEYS)} | "
+    f"Concurrent: {config.MAX_CONCURRENT_FILES}"
+)
 
 # ---------------------------------------------------------------------------
-# Thread pool for CPU-bound tasks (ZIP extraction, text parsing)
+# Thread pool for CPU-bound tasks
 # ---------------------------------------------------------------------------
 
 _executor = ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT_FILES)
 
 # ---------------------------------------------------------------------------
-# Gemini client with multi-key rotation + connection reuse
+# Gemini client with multi-key rotation
 # ---------------------------------------------------------------------------
 
 _gemini_clients = {}
@@ -64,11 +65,10 @@ _key_lock = asyncio.Lock()
 
 
 def _get_key_id(api_key: str) -> str:
-    return api_key[:8] + "..." if len(api_key) > 10 else api_key
+    return api_key[:12] + "..." if len(api_key) > 15 else api_key
 
 
 async def get_gemini_client(force_new: bool = False):
-    """Async-safe key rotation with caching."""
     if config.MOCK_AI:
         return None
     if not config.GEMINI_API_KEYS:
@@ -106,7 +106,7 @@ async def get_gemini_client(force_new: bool = False):
 async def mark_key_failed(api_key: str):
     async with _key_lock:
         _failed_keys.add(api_key)
-        logger.warning(f"Key {_get_key_id(api_key)} blacklisted (rate limit)")
+        logger.warning(f"Key {_get_key_id(api_key)} blacklisted")
 
 
 def _get_client_key(client) -> str:
@@ -172,8 +172,8 @@ class BatchAnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="SUPER FAST Unified File Intelligence API",
-    version="4.0.0",
+    description="SUPER FAST Unified File Intelligence API v5.0",
+    version="5.0.0",
 )
 
 app.add_middleware(
@@ -189,7 +189,7 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "4.0.0",
+        "version": "5.0.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
@@ -201,7 +201,6 @@ def root():
             "zip_processing", "batch_upload", "api_key_rotation",
             "async_concurrent", "speed_tiers",
         ],
-        "endpoints": ["POST /analyze", "POST /analyze/batch", "GET /health"],
     }
 
 
@@ -256,15 +255,13 @@ def detect_file_type(filename: str, mime_type: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Text extraction (CPU-bound, runs in thread pool)
+# Text extraction (CPU-bound, thread pool)
 # ---------------------------------------------------------------------------
 
 def _extract_pdf(raw: bytes) -> str:
     try:
         from pdfminer.high_level import extract_text
         return extract_text(io.BytesIO(raw)) or ""
-    except ImportError:
-        return ""
     except Exception:
         return ""
 
@@ -273,8 +270,6 @@ def _extract_docx(raw: bytes) -> str:
     try:
         import docx
         return "\n".join(p.text for p in docx.Document(io.BytesIO(raw)).paragraphs)
-    except ImportError:
-        return ""
     except Exception:
         return ""
 
@@ -352,7 +347,7 @@ async def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
 # Gemini AI call with retry + rotation + timeout
 # ---------------------------------------------------------------------------
 
-async def _call_gemini_with_retry(contents, prompt_text: str = "") -> Any:
+async def _call_gemini_with_retry(contents) -> Any:
     last_error = None
     max_retries = len(config.GEMINI_API_KEYS) if config.GEMINI_API_KEYS else 1
 
@@ -362,34 +357,21 @@ async def _call_gemini_with_retry(contents, prompt_text: str = "") -> Any:
             client = await get_gemini_client(force_new=(attempt > 0))
             key = _get_client_key(client)
 
-            from google.genai import types
-
-            if isinstance(contents, list):
-                response = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        _executor,
-                        lambda: client.models.generate_content(
-                            model=config.GEMINI_MODEL,
-                            contents=contents,
-                        )
-                    ),
-                    timeout=config.AI_TIMEOUT
-                )
-            else:
-                response = await asyncio.wait_for(
-                    asyncio.get_event_loop().run_in_executor(
-                        _executor,
-                        lambda: client.models.generate_content(
-                            model=config.GEMINI_MODEL,
-                            contents=[contents],
-                        )
-                    ),
-                    timeout=config.AI_TIMEOUT
-                )
+            loop = asyncio.get_event_loop()
+            response = await asyncio.wait_for(
+                loop.run_in_executor(
+                    _executor,
+                    lambda: client.models.generate_content(
+                        model=config.GEMINI_MODEL,
+                        contents=contents,
+                    )
+                ),
+                timeout=config.AI_TIMEOUT
+            )
             return response
 
         except asyncio.TimeoutError:
-            logger.warning(f"AI call timeout (attempt {attempt + 1}), rotating key...")
+            logger.warning(f"AI timeout (attempt {attempt + 1}), rotating...")
             if client and (key := _get_client_key(client)):
                 await mark_key_failed(key)
             last_error = "Timeout"
@@ -397,7 +379,7 @@ async def _call_gemini_with_retry(contents, prompt_text: str = "") -> Any:
         except Exception as exc:
             error_str = str(exc).lower()
             last_error = exc
-            if any(x in error_str for x in ["429", "rate limit", "quota", "unauthenticated", "401"]):
+            if any(x in error_str for x in ["429", "rate limit", "quota", "unauthenticated", "401", "permission"]):
                 if client and (key := _get_client_key(client)):
                     await mark_key_failed(key)
                 if config.AGGRESSIVE_RETRY:
@@ -425,7 +407,7 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
         return {"summary": text[:500]}
 
 
-def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
+async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
     if config.MOCK_AI:
         return {
             "summary": "[MOCK] Image analyzed",
@@ -470,21 +452,10 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
         )
 
     from google.genai import types
-    response = asyncio.get_event_loop().run_in_executor(
-        _executor,
-        lambda: _call_gemini_with_retry([
-            types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
-            prompt,
-        ])
-    )
-    # Actually call it properly via the retry wrapper
-    import asyncio
-    response = asyncio.get_event_loop().run_until_complete(
-        _call_gemini_with_retry([
-            types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
-            prompt,
-        ])
-    )
+    response = await _call_gemini_with_retry([
+        types.Part.from_bytes(data=raw, mime_type=mime_type or "image/jpeg"),
+        prompt,
+    ])
 
     parsed = _parse_json_response(response.text)
 
@@ -523,7 +494,7 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
         }
 
 
-def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     extracted_text = extract_document_text(filename, raw)
 
     if config.MOCK_AI:
@@ -541,8 +512,7 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         f"No markdown.\n\nDOCUMENT:\n{extracted_text[:config.MAX_TEXT_LENGTH]}"
     )
 
-    import asyncio
-    response = asyncio.get_event_loop().run_until_complete(_call_gemini_with_retry(prompt))
+    response = await _call_gemini_with_retry(prompt)
     parsed = _parse_json_response(response.text)
 
     return {
@@ -555,7 +525,7 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     }
 
 
-def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     code_text = _extract_plain(raw)
     ext = os.path.splitext(filename.lower())[1].lstrip(".")
 
@@ -580,8 +550,7 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             f"No markdown.\n\nCODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
         )
 
-    import asyncio
-    response = asyncio.get_event_loop().run_until_complete(_call_gemini_with_retry(prompt))
+    response = await _call_gemini_with_retry(prompt)
     parsed = _parse_json_response(response.text)
 
     key_points = [f"[bug] {b}" for b in parsed.get("bugs", [])]
@@ -598,7 +567,7 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     }
 
 
-def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     if not config.ENABLE_ARCHIVE_PROCESSING:
         return {
             "summary": "Archive processing disabled",
@@ -608,8 +577,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "archive_contents": [], "archive_summary": "",
         }
 
-    import asyncio
-    extracted_files = asyncio.get_event_loop().run_until_complete(extract_zip_contents(raw))
+    extracted_files = await extract_zip_contents(raw)
     total_files = len(extracted_files)
 
     if total_files == 0:
@@ -635,7 +603,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 "analysis": {"summary": f"[MOCK] {file_info.file_type}", "status": "mock"},
             })
         else:
-            archive_analyses.append(analyze_archive_file_sync(file_info))
+            archive_analyses.append(await analyze_archive_file(file_info))
 
     summary_parts = [f"Archive: {total_files} files"]
     for ftype, count in file_type_counts.items():
@@ -653,7 +621,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 "Analyze this ZIP archive. Return JSON: purpose, patterns, security_concerns, next_steps. "
                 f"No markdown.\n\n{'\n---\n'.join(overview)}"
             )
-            response = asyncio.get_event_loop().run_until_complete(_call_gemini_with_retry(prompt))
+            response = await _call_gemini_with_retry(prompt)
             parsed = _parse_json_response(response.text)
             archive_summary += f"\n\nAI: {parsed.get('purpose', 'N/A')}"
         except Exception as exc:
@@ -671,7 +639,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     }
 
 
-def analyze_archive_file_sync(file_info: ExtractedFile) -> Dict[str, Any]:
+async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
     result = {
         "filename": file_info.filename,
         "relative_path": file_info.relative_path,
@@ -682,15 +650,15 @@ def analyze_archive_file_sync(file_info: ExtractedFile) -> Dict[str, Any]:
     }
     try:
         if file_info.file_type == "image":
-            img = run_image_pipeline(file_info.filename, file_info.raw, file_info.mime_type)
+            img = await run_image_pipeline(file_info.filename, file_info.raw, file_info.mime_type)
             result["analysis"] = {"summary": img.get("summary", ""), "description": img.get("description", ""),
                                    "objects": img.get("objects", []), "text": img.get("text", "")}
         elif file_info.file_type == "document":
-            doc = run_document_pipeline(file_info.filename, file_info.raw)
+            doc = await run_document_pipeline(file_info.filename, file_info.raw)
             result["analysis"] = {"summary": doc.get("summary", ""), "key_points": doc.get("key_points", []),
                                    "text_preview": doc.get("text", "")[:500]}
         elif file_info.file_type == "code":
-            code = run_code_pipeline(file_info.filename, file_info.raw)
+            code = await run_code_pipeline(file_info.filename, file_info.raw)
             result["analysis"] = {"summary": code.get("summary", ""), "key_points": code.get("key_points", []),
                                    "language": code.get("description", "")}
         else:
@@ -702,7 +670,7 @@ def analyze_archive_file_sync(file_info: ExtractedFile) -> Dict[str, Any]:
     return result
 
 
-def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
+async def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
     text = _extract_plain(raw)
     has_text = bool(text.strip())
     return {
@@ -736,15 +704,15 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
     try:
         if file_type == "image":
-            result = run_image_pipeline(file.filename, raw, mime_type)
+            result = await run_image_pipeline(file.filename, raw, mime_type)
         elif file_type == "document":
-            result = run_document_pipeline(file.filename, raw)
+            result = await run_document_pipeline(file.filename, raw)
         elif file_type == "code":
-            result = run_code_pipeline(file.filename, raw)
+            result = await run_code_pipeline(file.filename, raw)
         elif file_type == "archive":
-            result = run_archive_pipeline(file.filename, raw)
+            result = await run_archive_pipeline(file.filename, raw)
         else:
-            result = run_unknown_pipeline(file.filename, raw)
+            result = await run_unknown_pipeline(file.filename, raw)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     except Exception as exc:
@@ -801,7 +769,7 @@ async def analyze(file: UploadFile = File(...)):
 
 @app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
 async def analyze_batch(files: List[UploadFile] = File(...)):
-    """Analyze multiple files concurrently with semaphore control."""
+    """Analyze multiple files concurrently."""
     start = time.time()
 
     tasks = [analyze_single_file_limited(file) for file in files]
