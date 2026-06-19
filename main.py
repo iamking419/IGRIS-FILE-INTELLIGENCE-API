@@ -224,8 +224,7 @@ def extract_text_from_docx(raw: bytes) -> str:
 
     try:
         document = docx.Document(io.BytesIO(raw))
-        return "
-".join(p.text for p in document.paragraphs)
+        return "".join(p.text for p in document.paragraphs)
     except Exception as exc:
         logger.warning(f"DOCX extraction failed: {exc}")
         return ""
