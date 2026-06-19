@@ -1,11 +1,3 @@
-"""
-IGRIS AI Backend — Configuration Module
-========================================
-
-Centralized config for all settings. Edit this file directly or override
-via environment variables (env vars take precedence over file values).
-"""
-
 import os
 from typing import Optional
 
