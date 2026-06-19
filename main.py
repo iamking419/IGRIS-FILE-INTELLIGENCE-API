@@ -1,14 +1,15 @@
 """
-IGRIS AI Backend v6.3 (Groq + Auto Catbox Upload + Vision)
-============================================================
+IGRIS AI Backend v6.0 (Groq Edition) - SUPER FAST File Intelligence
+====================================================================
 
 Features:
   - Multi-API key rotation for Groq
-  - Single /analyze endpoint handles 1 or multiple files
-  - Images: auto-uploaded to catbox.moe, then Groq analyzes via URL
-  - Documents/code/archives: analyzed directly via Groq
   - Async concurrent batch processing
+  - Speed tier system
+  - Parallel archive extraction
+  - 100MB file limit
   - Rate limit aware retry with exponential backoff
+  - Groq chat completions API (OpenAI-compatible)
 
 Uses: groq SDK (pip install groq)
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
@@ -20,10 +21,10 @@ import json
 import logging
 import mimetypes
 import zipfile
+import random
 import time
 import asyncio
 import base64
-import aiohttp
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -46,7 +47,7 @@ logging.basicConfig(
 logger = logging.getLogger("igris")
 
 logger.info(
-    f"IGRIS v6.3 (Groq) | Model: {config.GROQ_MODEL} | "
+    f"IGRIS v6.0 (Groq) | Model: {config.GROQ_MODEL} | "
     f"Tier: {config.SPEED_TIER} | Keys: {len(config.GROQ_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
@@ -133,48 +134,6 @@ def _get_client_key(client) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Catbox.moe upload helper
-# ---------------------------------------------------------------------------
-
-CATBOX_API_URL = "https://litterbox.catbox.moe/resources/internals/api.php"
-
-
-async def upload_image_to_catbox(raw: bytes, filename: str, mime_type: str) -> str:
-    """Upload image bytes to catbox.moe and return the public URL."""
-    try:
-        # Determine file extension from mime_type
-        ext = mimetypes.guess_extension(mime_type) or ".png"
-        temp_filename = f"igris_{int(time.time())}{ext}"
-
-        data = aiohttp.FormData()
-        data.add_field("reqtype", "fileupload")
-        data.add_field("time", "1h")  # 1 hour expiry, use "1h" or "12h" or "24h" or "72h"
-        data.add_field(
-            "fileToUpload",
-            raw,
-            filename=temp_filename,
-            content_type=mime_type,
-        )
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(CATBOX_API_URL, data=data, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                if resp.status != 200:
-                    text = await resp.text()
-                    raise RuntimeError(f"Catbox upload failed: HTTP {resp.status} - {text[:200]}")
-
-                url = (await resp.text()).strip()
-                if not url.startswith("http"):
-                    raise RuntimeError(f"Catbox returned invalid URL: {url[:200]}")
-
-                logger.info(f"Image uploaded to catbox: {url[:80]}...")
-                return url
-
-    except Exception as exc:
-        logger.error(f"Catbox upload failed: {exc}")
-        raise RuntimeError(f"Failed to upload image to catbox: {exc}")
-
-
-# ---------------------------------------------------------------------------
 # Response models
 # ---------------------------------------------------------------------------
 
@@ -207,7 +166,6 @@ class MetaBlock(BaseModel):
     mime_type: str
     extracted_files: int = 0
     processing_time_ms: float = 0.0
-    image_url: str = ""  # NEW: stores catbox URL for images
 
 
 class SingleAnalyzeResponse(BaseModel):
@@ -231,8 +189,8 @@ class BatchAnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="SUPER FAST Unified File Intelligence API v6.3 (Groq + Auto Catbox)",
-    version="6.3.0",
+    description="SUPER FAST Unified File Intelligence API v6.0 (Groq)",
+    version="6.0.0",
 )
 
 app.add_middleware(
@@ -248,7 +206,7 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "6.3.0",
+        "version": "6.0.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
@@ -403,7 +361,7 @@ async def extract_zip_contents(raw: bytes) -> List[ExtractedFile]:
 # Groq AI call with retry + rotation + timeout
 # ---------------------------------------------------------------------------
 
-async def _call_groq_with_retry(messages: List[Dict[str, Any]], temperature: float = 0.3) -> Any:
+async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: float = 0.3) -> Any:
     """Call Groq chat.completions with retry, key rotation, and rate limit protection."""
     last_error = None
     max_retries = min(len(config.GROQ_API_KEYS) if config.GROQ_API_KEYS else 1, 4)
@@ -426,6 +384,7 @@ async def _call_groq_with_retry(messages: List[Dict[str, Any]], temperature: flo
                 timeout=config.AI_TIMEOUT
             )
 
+            # Success! Reset fail count for this key
             if key and key in _key_fail_counts:
                 _key_fail_counts[key] = max(0, _key_fail_counts[key] - 1)
 
@@ -440,6 +399,7 @@ async def _call_groq_with_retry(messages: List[Dict[str, Any]], temperature: flo
             error_str = str(exc).lower()
             last_error = exc
 
+            # Categorize the error
             if "429" in error_str or "rate limit" in error_str:
                 logger.warning(f"Rate limit on key {key_id} - backing off")
                 if key:
@@ -495,18 +455,30 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
         return {"summary": text[:500]}
 
 
-async def run_image_pipeline(
-    filename: str,
-    raw: Optional[bytes] = None,
-    mime_type: str = "",
-    image_url: Optional[str] = None,
-) -> Dict[str, Any]:
-    """
-    Analyze an image via Groq vision.
+def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
+    """Extract basic metadata from image bytes since Groq doesn't support vision."""
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(raw))
+        return {
+            "format": img.format,
+            "mode": img.mode,
+            "width": img.width,
+            "height": img.height,
+            "size_bytes": len(raw),
+            "mime_type": mime_type,
+        }
+    except Exception:
+        return {"size_bytes": len(raw), "mime_type": mime_type}
 
-    If raw bytes provided: uploads to catbox.moe first, then sends URL to Groq.
-    If image_url provided: sends URL directly to Groq.
-    """
+
+def _image_to_base64(raw: bytes, mime_type: str) -> str:
+    """Convert image to base64 data URI for potential vision support."""
+    b64 = base64.b64encode(raw).decode("utf-8")
+    return f"data:{mime_type};base64,{b64}"
+
+
+async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
     if config.MOCK_AI:
         return {
             "summary": "[MOCK] Image analyzed",
@@ -525,56 +497,39 @@ async def run_image_pipeline(
                 "mood_atmosphere": "[MOCK] mood",
                 "technical_quality": "[MOCK] tech",
                 "safety_flags": [],
-            },
-            "image_url": "[MOCK] url",
+            }
         }
 
-    # If raw bytes provided, upload to catbox first
-    catbox_url = image_url
-    if raw and not image_url:
-        catbox_url = await upload_image_to_catbox(raw, filename, mime_type or "image/jpeg")
-
-    if not catbox_url:
-        raise ValueError("No image URL available for analysis")
+    # Groq doesn't support vision. Extract metadata and describe textually.
+    metadata = _get_image_metadata(raw, mime_type)
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         prompt = (
-            "Analyze this image in extreme detail. Provide:\n"
-            "1. SCENE DESCRIPTION: vivid narrative\n"
-            "2. OBJECTS DETECTED: exhaustive list\n"
-            "3. TEXT (OCR): all visible text\n"
-            "4. UI INTERPRETATION: if screenshot\n"
-            "5. DOMINANT COLORS: hex codes\n"
-            "6. COMPOSITION: layout analysis\n"
-            "7. MOOD & ATMOSPHERE: emotional tone\n"
-            "8. TECHNICAL QUALITY: resolution, focus, etc\n"
-            "9. SAFETY FLAGS: sensitive content\n\n"
+            f"I have an image file named '{filename}' with these properties:\n"
+            f"- Format: {metadata.get('format', 'unknown')}\n"
+            f"- Dimensions: {metadata.get('width', '?')}x{metadata.get('height', '?')}\n"
+            f"- Mode: {metadata.get('mode', 'unknown')}\n"
+            f"- Size: {metadata.get('size_bytes', 0)} bytes\n"
+            f"- MIME: {metadata.get('mime_type', 'unknown')}\n\n"
+            "Since I cannot see the actual image, provide a GENERIC but detailed analysis template. "
             "Respond ONLY as JSON with keys: scene_description, objects_detected, text_ocr, "
             "ui_interpretation, colors_dominant, composition, mood_atmosphere, technical_quality, safety_flags. "
             "No markdown, no preamble."
         )
     else:
         prompt = (
-            "Analyze this image. Provide JSON with: description, objects (array), "
+            f"I have an image file named '{filename}' ({metadata.get('width', '?')}x{metadata.get('height', '?')}, "
+            f"{metadata.get('format', 'unknown')}). Provide JSON with: description, objects (array), "
             "text (string), insights (array). No markdown."
         )
 
-    messages = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": catbox_url}},
-            ],
-        }
-    ]
-
+    messages = [{"role": "user", "content": prompt}]
     response = await _call_groq_with_retry(messages)
     parsed = _parse_json_response(response.choices[0].message.content)
 
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         return {
-            "summary": (parsed.get("scene_description", "")[:280] or "Image analyzed"),
+            "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
             "description": parsed.get("scene_description", ""),
             "key_points": [],
             "objects": parsed.get("objects_detected", []),
@@ -595,7 +550,6 @@ async def run_image_pipeline(
                 "technical_quality": parsed.get("technical_quality", ""),
                 "safety_flags": parsed.get("safety_flags", []),
             },
-            "image_url": catbox_url,
         }
     else:
         return {
@@ -605,7 +559,6 @@ async def run_image_pipeline(
             "objects": parsed.get("objects", []),
             "text": parsed.get("text", ""),
             "insights": parsed.get("insights", []),
-            "image_url": catbox_url,
         }
 
 
@@ -820,11 +773,9 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
     logger.info(f"Processing '{file.filename}' ({size}b, {file_type})")
 
-    image_url = ""
     try:
         if file_type == "image":
             result = await run_image_pipeline(file.filename, raw, mime_type)
-            image_url = result.get("image_url", "")
         elif file_type == "document":
             result = await run_document_pipeline(file.filename, raw)
         elif file_type == "code":
@@ -860,7 +811,6 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
             mime_type=mime_type,
             extracted_files=len(result.get("archive_contents", [])),
             processing_time_ms=round(elapsed, 2),
-            image_url=image_url,
         ),
     )
 
@@ -878,40 +828,22 @@ async def analyze_single_file_limited(file: UploadFile) -> SingleAnalyzeResponse
 
 
 # ---------------------------------------------------------------------------
-# MERGED ENDPOINT: /analyze handles both single and batch
+# Endpoints
 # ---------------------------------------------------------------------------
 
-@app.post("/analyze")
-async def analyze(
-    files: List[UploadFile] = File(default=[]),
-    file: UploadFile = File(default=None),
-):
-    """
-    Analyze file(s). Works with single OR multiple files (like ChatGPT).
+@app.post("/analyze", response_model=SingleAnalyzeResponse)
+async def analyze(file: UploadFile = File(...)):
+    """Analyze a single file."""
+    response = await analyze_single_file(file)
+    return JSONResponse(content=response.model_dump())
 
-    Images are auto-uploaded to catbox.moe, then Groq analyzes via the public URL.
-    Documents, code, and archives are analyzed directly.
 
-    - Upload 1 file -> returns SingleAnalyzeResponse
-    - Upload multiple files -> returns BatchAnalyzeResponse
-    """
-    all_files = []
-    if file is not None:
-        all_files.append(file)
-    if files:
-        all_files.extend(files)
-
-    if not all_files:
-        raise HTTPException(status_code=400, detail="No files uploaded. Use 'file' for single or 'files' for multiple.")
-
-    # Single file -> return single response directly
-    if len(all_files) == 1:
-        response = await analyze_single_file(all_files[0])
-        return JSONResponse(content=response.model_dump())
-
-    # Multiple files -> batch processing
+@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
+async def analyze_batch(files: List[UploadFile] = File(...)):
+    """Analyze multiple files concurrently."""
     start = time.time()
-    tasks = [analyze_single_file_limited(f) for f in all_files]
+
+    tasks = [analyze_single_file_limited(file) for file in files]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     processed = []
@@ -921,7 +853,7 @@ async def analyze(
     for i, result in enumerate(results):
         if isinstance(result, Exception):
             failed += 1
-            fname = all_files[i].filename if i < len(all_files) else "unknown"
+            fname = files[i].filename if i < len(files) else "unknown"
             processed.append(SingleAnalyzeResponse(
                 file_type="error",
                 summary=f"Error: {str(result)}",
@@ -936,7 +868,7 @@ async def analyze(
 
     return JSONResponse(content=BatchAnalyzeResponse(
         results=processed,
-        total_files=len(all_files),
+        total_files=len(files),
         successful=successful,
         failed=failed,
         total_time_ms=round(total_time, 2),
