@@ -1,38 +1,37 @@
 """
-IGRIS AI Backend - Configuration Module
-========================================
+IGRIS AI Backend - Configuration Module v3.0
+============================================
 
-Centralized config for all settings. Edit this file directly or override
-via environment variables (env vars take precedence over file values).
+Multi-API key rotation system for maximum uptime and speed.
+Keys are rotated automatically when rate limits are hit.
 
-Get your API key at: https://aistudio.google.com/app/apikey
+Get your API keys at: https://aistudio.google.com/app/apikey
 """
 
 import os
+import random
 
 # ---------------------------------------------------------------------------
-# GEMINI AI CONFIGURATION - SET THESE BEFORE DEPLOYING
+# GEMINI AI CONFIGURATION - MULTI-KEY ROTATION SYSTEM
 # ---------------------------------------------------------------------------
 
-# Your Google Gemini API key.
-# Get one free at: https://aistudio.google.com/app/apikey
-# Paste the full key string below - do NOT include quotes if using env vars.
-GEMINI_API_KEY = "AIzaSyBh5vODoa8Nh1hhiUzSy3SB7SlGtDyDWzs"
+# List of Google Gemini API keys for rotation.
+# Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches to the next.
+# Format: ["key1", "key2", "key3", "key4"]
+# Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
+GEMINI_API_KEYS = [
+    "",  # Key 1
+    "",  # Key 2
+    "",  # Key 3
+    "",  # Key 4
+]
 
 # Set to "true" to force mock mode (no real AI calls, returns placeholder data).
-# Set to "false" to force live mode (requires valid GEMINI_API_KEY).
-# Leave empty "" to auto-detect: mock mode if no key, live mode if key present.
+# Set to "false" to force live mode (requires valid GEMINI_API_KEYS).
+# Leave empty "" to auto-detect: mock mode if no keys, live if keys present.
 MOCK_AI = ""
 
 # Gemini model to use.
-# Valid options (as of June 2026):
-#   "gemini-3-flash-preview"     - Fast, cheap, multimodal (RECOMMENDED)
-#   "gemini-3.5-flash"           - Latest GA release, smartest Flash model
-#   "gemini-3.1-flash-lite"      - Ultra cheap, slightly lower quality
-#   "gemini-3.1-pro-preview"     - Deep reasoning, highest quality
-#   "gemini-2.5-flash"           - Older but stable fallback
-# INVALID models that will fail:
-#   "gemini-1.5-flash"           - SHUTDOWN (fully deprecated by Google)
 GEMINI_MODEL = "gemini-3-flash-preview"
 
 # ---------------------------------------------------------------------------
@@ -48,58 +47,30 @@ WORKERS = 1
 # File Processing Limits
 # ---------------------------------------------------------------------------
 
-# Max file upload size in bytes (100 MB default)
-MAX_FILE_SIZE = 100 * 1024 * 1024
-
-# Max number of files to process inside a ZIP archive
+MAX_FILE_SIZE = 100 * 1024 * 1024       # 100 MB
 MAX_ARCHIVE_FILES = 100
-
-# Max total size of extracted archive contents in bytes (200 MB default)
 MAX_ARCHIVE_TOTAL_SIZE = 200 * 1024 * 1024
-
-# Max text length to send to Gemini per file (to stay within token limits)
 MAX_TEXT_LENGTH = 30000
-
-# Max image dimension (width or height) before resizing
 MAX_IMAGE_DIMENSION = 4096
 
 # ---------------------------------------------------------------------------
-# Logging Configuration
+# Logging & CORS
 # ---------------------------------------------------------------------------
 
-# Log level: DEBUG, INFO, WARNING, ERROR, CRITICAL
 LOG_LEVEL = "INFO"
-
-# Log format string
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 
-# ---------------------------------------------------------------------------
-# CORS Configuration
-# ---------------------------------------------------------------------------
-
-# Allowed origins for CORS. Use ["*"] for dev, restrict in production.
 CORS_ORIGINS = ["*"]
-
-# Allow credentials in CORS requests
 CORS_ALLOW_CREDENTIALS = True
-
-# Allowed HTTP methods
 CORS_ALLOW_METHODS = ["*"]
-
-# Allowed HTTP headers
 CORS_ALLOW_HEADERS = ["*"]
 
 # ---------------------------------------------------------------------------
 # Feature Flags
 # ---------------------------------------------------------------------------
 
-# Enable detailed image analysis (scene, colors, composition, mood, etc.)
 ENABLE_DETAILED_IMAGE_ANALYSIS = True
-
-# Enable archive (ZIP) recursive processing
 ENABLE_ARCHIVE_PROCESSING = True
-
-# Enable code security scanning
 ENABLE_SECURITY_SCAN = True
 
 # ---------------------------------------------------------------------------
@@ -121,7 +92,7 @@ def _resolve(name, default, type_func=str):
     return file_val
 
 
-GEMINI_API_KEY = _resolve("GEMINI_API_KEY", GEMINI_API_KEY)
+# Resolve env vars
 MOCK_AI_RAW = _resolve("MOCK_AI", MOCK_AI)
 GEMINI_MODEL = _resolve("GEMINI_MODEL", GEMINI_MODEL)
 HOST = _resolve("HOST", HOST)
@@ -143,18 +114,53 @@ ENABLE_DETAILED_IMAGE_ANALYSIS = _resolve("ENABLE_DETAILED_IMAGE_ANALYSIS", ENAB
 ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE_PROCESSING, bool)
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
 
+# ---------------------------------------------------------------------------
+# Multi-Key Resolution & Rotation Logic
+# ---------------------------------------------------------------------------
+
+# Get keys from env var (comma-separated) or file list
+_env_keys = _resolve("GEMINI_API_KEYS", "", str)
+if _env_keys:
+    GEMINI_API_KEYS = [k.strip() for k in _env_keys.split(",") if k.strip()]
+
+# Filter out empty keys
+GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k.strip()]
+
+# Current active key index (rotates on rate limit)
+_current_key_index = 0
+
+
+def get_next_api_key():
+    """Get the next available API key (rotates on failure)."""
+    global _current_key_index
+    if not GEMINI_API_KEYS:
+        return None
+    key = GEMINI_API_KEYS[_current_key_index % len(GEMINI_API_KEYS)]
+    _current_key_index = (_current_key_index + 1) % len(GEMINI_API_KEYS)
+    return key
+
+
+def get_random_api_key():
+    """Get a random API key from the pool (for load distribution)."""
+    if not GEMINI_API_KEYS:
+        return None
+    return random.choice(GEMINI_API_KEYS)
+
+
+# Backward compatibility: single key access
+GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
+
 # Final mock mode resolution
 if MOCK_AI_RAW.lower() == "true":
     MOCK_AI = True
 elif MOCK_AI_RAW.lower() == "false":
     MOCK_AI = False
 else:
-    # Auto-detect: mock if no key, live if key present
-    MOCK_AI = not bool(GEMINI_API_KEY)
+    MOCK_AI = not bool(GEMINI_API_KEYS)
 
 # Validate
-if not MOCK_AI and not GEMINI_API_KEY:
+if not MOCK_AI and not GEMINI_API_KEYS:
     raise RuntimeError(
-        "MOCK_AI is disabled but GEMINI_API_KEY is not set. "
-        "Either set GEMINI_API_KEY in config.py or set MOCK_AI='true'."
+        "MOCK_AI is disabled but no GEMINI_API_KEYS are set. "
+        "Either add keys to GEMINI_API_KEYS in config.py or set MOCK_AI='true'."
     )
