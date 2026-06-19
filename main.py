@@ -26,6 +26,7 @@ import random
 import time
 import asyncio
 import base64
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -169,6 +170,7 @@ async def get_gemini_client():
             return client
         except Exception as exc:
             logger.error(f"Gemini client init failed: {exc}")
+            logger.error(traceback.format_exc())
             return None
 
 
@@ -218,6 +220,7 @@ async def call_gemini_vision(filename: str, raw: bytes, mime_type: str) -> Dict[
         raise RuntimeError("Gemini vision timeout")
     except Exception as exc:
         logger.error(f"Gemini vision error: {exc}")
+        logger.error(traceback.format_exc())
         raise
 
 
@@ -622,6 +625,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             }
         except Exception as exc:
             logger.warning(f"Gemini vision failed for '{filename}', falling back to Groq: {exc}")
+            logger.warning(traceback.format_exc())
 
     # Fallback: Groq text-only (metadata-based) - NEVER calls Gemini
     metadata = _get_image_metadata(raw, mime_type)
@@ -963,9 +967,6 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
 # ---------------------------------------------------------------------------
 # SINGLE FILE ENDPOINT: /analyze (ONE file only)
-# 
-# Uses UploadFile (not List[UploadFile]) so Swagger shows a single
-# proper file picker instead of array<string> text boxes.
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze", response_model=SingleAnalyzeResponse)
