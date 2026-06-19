@@ -1,15 +1,17 @@
 """
-IGRIS AI Backend — Unified File Intelligence API v2.0
+IGRIS AI Backend - Unified File Intelligence API v2.1
 =====================================================
 
-Single endpoint (POST /analyze) that accepts any file, detects its type,
-routes it to the correct processing pipeline, and returns structured JSON analysis.
+Single endpoint (POST /analyze) that accepts ANY file(s), detects type,
+routes to the correct AI pipeline, and returns structured JSON analysis.
 
-NEW in v2.0:
-  - Centralized config.py instead of scattered env vars
+Features:
+  - Multi-file upload support (batch processing)
+  - 100MB file size limit
   - ZIP archive recursive processing
-  - Enhanced image analysis with detailed scene understanding
-  - Real Gemini AI integration (mock mode still available for testing)
+  - Enhanced image analysis with 9-field deep analysis
+  - Real Gemini AI integration with fallback to mock mode
+  - Production-ready error handling and logging
 
 Run locally:
     pip install -r requirements.txt
@@ -25,7 +27,7 @@ import zipfile
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
 
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, File, UploadFile, HTTPException, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -107,11 +109,18 @@ class MetaBlock(BaseModel):
     extracted_files: int = 0
 
 
-class AnalyzeResponse(BaseModel):
+class SingleAnalyzeResponse(BaseModel):
     file_type: str
     summary: str
     analysis: AnalysisBlock
     meta: MetaBlock
+
+
+class BatchAnalyzeResponse(BaseModel):
+    results: List[SingleAnalyzeResponse]
+    total_files: int
+    successful: int
+    failed: int
 
 
 # ---------------------------------------------------------------------------
@@ -120,8 +129,8 @@ class AnalyzeResponse(BaseModel):
 
 app = FastAPI(
     title="IGRIS AI Backend",
-    description="Unified File Intelligence API — upload anything, get structured AI analysis.",
-    version="2.0.0",
+    description="Unified File Intelligence API - upload anything, get structured AI analysis.",
+    version="2.1.0",
 )
 
 app.add_middleware(
@@ -137,7 +146,7 @@ app.add_middleware(
 def root():
     return {
         "service": "IGRIS AI Backend",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "model": config.GEMINI_MODEL,
@@ -146,8 +155,9 @@ def root():
             "document_analysis",
             "code_analysis",
             "zip_processing",
+            "batch_upload",
         ],
-        "endpoint": "POST /analyze",
+        "endpoints": ["POST /analyze (single or batch)", "GET /health"],
     }
 
 
@@ -207,7 +217,7 @@ def extract_text_from_pdf(raw: bytes) -> str:
     try:
         from pdfminer.high_level import extract_text
     except ImportError:
-        return "[pdfminer not installed — cannot extract PDF text]"
+        return "[pdfminer not installed - cannot extract PDF text]"
 
     try:
         return extract_text(io.BytesIO(raw)) or ""
@@ -220,11 +230,11 @@ def extract_text_from_docx(raw: bytes) -> str:
     try:
         import docx
     except ImportError:
-        return "[python-docx not installed — cannot extract DOCX text]"
+        return "[python-docx not installed - cannot extract DOCX text]"
 
     try:
         document = docx.Document(io.BytesIO(raw))
-        return "".join(p.text for p in document.paragraphs)
+        return "\n".join(p.text for p in document.paragraphs)
     except Exception as exc:
         logger.warning(f"DOCX extraction failed: {exc}")
         return ""
@@ -351,7 +361,7 @@ def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
         else:
             text = extract_text_from_plain(file_info.raw)
             result["analysis"] = {
-                "summary": "Unknown file type — raw text extraction attempted." if text.strip() else "Binary or unreadable file.",
+                "summary": "Unknown file type - raw text extraction attempted." if text.strip() else "Binary or unreadable file.",
                 "text_preview": text[:500] if text.strip() else "",
             }
     except Exception as exc:
@@ -368,7 +378,7 @@ def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
 def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
     if config.MOCK_AI:
         return {
-            "summary": "[MOCK] Image analyzed — placeholder scene description.",
+            "summary": "[MOCK] Image analyzed - placeholder scene description.",
             "description": "[MOCK] This is a placeholder description of the image contents.",
             "key_points": [],
             "objects": ["[mock-object-1]", "[mock-object-2]"],
@@ -377,7 +387,7 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
             "image_details": {
                 "scene_description": "[MOCK] A placeholder scene showing generic objects.",
                 "objects_detected": ["[mock] person", "[mock] building", "[mock] vehicle"],
-                "text_ocr": "[MOCK] Sample OCR text: 'Welcome to the app'",
+                "text_ocr": "[MOCK] Sample OCR text: Welcome to the app",
                 "ui_interpretation": "[MOCK] This appears to be a login screen with username and password fields.",
                 "colors_dominant": ["#3B82F6", "#1F2937", "#F3F4F6"],
                 "composition": "[MOCK] Centered layout with header at top, form in middle, footer at bottom.",
@@ -392,61 +402,37 @@ def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, A
     if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
         prompt = (
             "You are an expert computer vision analyst. Analyze this image in extreme detail. "
-            "Provide a comprehensive analysis covering ALL of the following aspects:
-
-"
+            "Provide a comprehensive analysis covering ALL of the following aspects:\n\n"
             "1. SCENE DESCRIPTION: A vivid, detailed paragraph describing what is happening in the image, "
-            "including setting, context, and any narrative elements.
-"
+            "including setting, context, and any narrative elements.\n"
             "2. OBJECTS DETECTED: A comprehensive list of ALL distinct physical objects, people, animals, "
-            "vehicles, buildings, furniture, tools, devices, clothing items, food, plants, etc. Be exhaustive.
-"
-            "3. TEXT (OCR): ALL visible text in the image — signs, labels, UI text, handwriting, logos, "
-            "watermarks, timestamps, captions, URLs, phone numbers, etc. Preserve line breaks.
-"
+            "vehicles, buildings, furniture, tools, devices, clothing items, food, plants, etc. Be exhaustive.\n"
+            "3. TEXT (OCR): ALL visible text in the image - signs, labels, UI text, handwriting, logos, "
+            "watermarks, timestamps, captions, URLs, phone numbers, etc. Preserve line breaks.\n"
             "4. UI/APP INTERPRETATION: If this is a screenshot or UI image, describe the interface in detail: "
             "what app/website it is, what page/screen, what buttons/fields are present, what the user flow appears to be, "
-            "design system used (Material, iOS, etc.), and any visible data/state. If not a UI, say 'Not a UI screenshot.'
-"
-            "5. DOMINANT COLORS: List the 3-5 most prominent colors as hex codes.
-"
-            "6. COMPOSITION: Describe the visual layout — rule of thirds, symmetry, focal points, "
-            "depth of field, perspective, framing, leading lines, etc.
-"
-            "7. MOOD & ATMOSPHERE: The emotional tone — cheerful, somber, tense, peaceful, chaotic, "
-            "professional, casual, luxurious, minimalist, etc. Explain why.
-"
+            "design system used (Material, iOS, etc.), and any visible data/state. If not a UI, say Not a UI screenshot.\n"
+            "5. DOMINANT COLORS: List the 3-5 most prominent colors as hex codes.\n"
+            "6. COMPOSITION: Describe the visual layout - rule of thirds, symmetry, focal points, "
+            "depth of field, perspective, framing, leading lines, etc.\n"
+            "7. MOOD & ATMOSPHERE: The emotional tone - cheerful, somber, tense, peaceful, chaotic, "
+            "professional, casual, luxurious, minimalist, etc. Explain why.\n"
             "8. TECHNICAL QUALITY: Resolution estimate, lighting quality, focus sharpness, "
-            "noise/grain, compression artifacts, exposure, color balance, camera angle.
-"
-            "9. SAFETY FLAGS: Any content that may be sensitive — violence, nudity, hate symbols, "
-            "drug paraphernalia, self-harm, etc. List specifically what was detected. Empty array if none.
-
-"
-            "Respond ONLY as JSON with this exact structure:
-"
-            "{
-"
-            '  "scene_description": "string",
-'
-            '  "objects_detected": ["string", "string"],
-'
-            '  "text_ocr": "string",
-'
-            '  "ui_interpretation": "string",
-'
-            '  "colors_dominant": ["#RRGGBB"],
-'
-            '  "composition": "string",
-'
-            '  "mood_atmosphere": "string",
-'
-            '  "technical_quality": "string",
-'
-            '  "safety_flags": ["string"]
-'
-            "}
-"
+            "noise/grain, compression artifacts, exposure, color balance, camera angle.\n"
+            "9. SAFETY FLAGS: Any content that may be sensitive - violence, nudity, hate symbols, "
+            "drug paraphernalia, self-harm, etc. List specifically what was detected. Empty array if none.\n\n"
+            "Respond ONLY as JSON with this exact structure:\n"
+            "{\n"
+            '  "scene_description": "string",\n'
+            '  "objects_detected": ["string", "string"],\n'
+            '  "text_ocr": "string",\n'
+            '  "ui_interpretation": "string",\n'
+            '  "colors_dominant": ["#RRGGBB"],\n'
+            '  "composition": "string",\n'
+            '  "mood_atmosphere": "string",\n'
+            '  "technical_quality": "string",\n'
+            '  "safety_flags": ["string"]\n'
+            "}\n"
             "No markdown, no preamble, no explanation outside the JSON."
         )
     else:
@@ -516,7 +502,7 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
     if config.MOCK_AI:
         return {
-            "summary": "[MOCK] Document summarized — placeholder summary text.",
+            "summary": "[MOCK] Document summarized - placeholder summary text.",
             "description": "",
             "key_points": ["[mock] Key point one", "[mock] Key point two"],
             "objects": [],
@@ -529,11 +515,8 @@ def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         "You will be given the extracted text of a document. Provide: "
         "(1) a concise summary, (2) a list of key points, (3) any notable insights. "
         "Respond ONLY as JSON with keys: summary, key_points (array of strings), "
-        "insights (array of strings). No markdown, no preamble.
-
-"
-        f"DOCUMENT TEXT:
-{extracted_text[:config.MAX_TEXT_LENGTH]}"
+        "insights (array of strings). No markdown, no preamble.\n\n"
+        f"DOCUMENT TEXT:\n{extracted_text[:config.MAX_TEXT_LENGTH]}"
     )
 
     response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -555,7 +538,7 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
     if config.MOCK_AI:
         return {
-            "summary": f"[MOCK] {ext} code reviewed — placeholder summary.",
+            "summary": f"[MOCK] {ext} code reviewed - placeholder summary.",
             "description": f"[MOCK] Detected language: {ext}",
             "key_points": ["[mock] No real bugs found (mock mode)"],
             "objects": [],
@@ -572,11 +555,8 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "(3) a list of security issues found, (4) a list of suggested improvements. "
             "Respond ONLY as JSON with keys: summary, bugs (array of strings), "
             "security_issues (array of strings), improvements (array of strings). "
-            "No markdown, no preamble.
-
-"
-            f"CODE:
-{code_text[:config.MAX_TEXT_LENGTH]}"
+            "No markdown, no preamble.\n\n"
+            f"CODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
         )
     else:
         prompt = (
@@ -584,11 +564,8 @@ def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             "(1) a concise summary of what the code does, (2) a list of bugs found, "
             "(3) a list of suggested improvements. "
             "Respond ONLY as JSON with keys: summary, bugs (array of strings), "
-            "improvements (array of strings). No markdown, no preamble.
-
-"
-            f"CODE:
-{code_text[:config.MAX_TEXT_LENGTH]}"
+            "improvements (array of strings). No markdown, no preamble.\n\n"
+            f"CODE:\n{code_text[:config.MAX_TEXT_LENGTH]}"
         )
 
     response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -629,7 +606,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
     if total_files == 0:
         return {
-            "summary": "Empty ZIP archive — no files found to analyze.",
+            "summary": "Empty ZIP archive - no files found to analyze.",
             "description": "",
             "key_points": ["Archive contains no extractable files."],
             "objects": [],
@@ -665,8 +642,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
         if count > 0:
             summary_parts.append(f"  - {count} {ftype} file(s)")
 
-    archive_summary = "
-".join(summary_parts)
+    archive_summary = "\n".join(summary_parts)
 
     if not config.MOCK_AI and total_files > 0:
         try:
@@ -674,33 +650,20 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
             archive_overview = []
             for item in archive_analyses[:20]:
                 archive_overview.append(
-                    f"File: {item['filename']} ({item['file_type']})
-"
+                    f"File: {item['filename']} ({item['file_type']})\n"
                     f"Summary: {item['analysis'].get('summary', 'N/A')[:200]}"
                 )
 
             prompt = (
                 "You are analyzing a ZIP archive containing multiple files. "
-                "Based on the following file summaries, provide an overall assessment:
-
-"
-                "1. What is the likely purpose of this archive?
-"
-                "2. Are there any patterns or relationships between the files?
-"
-                "3. Any security concerns or red flags?
-"
-                "4. Suggested next steps for the user.
-
-"
+                "Based on the following file summaries, provide an overall assessment:\n\n"
+                "1. What is the likely purpose of this archive?\n"
+                "2. Are there any patterns or relationships between the files?\n"
+                "3. Any security concerns or red flags?\n"
+                "4. Suggested next steps for the user.\n\n"
                 "Respond ONLY as JSON with keys: purpose, patterns, security_concerns, next_steps. "
-                "No markdown, no preamble.
-
-"
-                f"ARCHIVE CONTENTS:
-{'
----
-'.join(archive_overview)}"
+                "No markdown, no preamble.\n\n"
+                f"ARCHIVE CONTENTS:\n{'\n---\n'.join(archive_overview)}"
             )
 
             response = client.models.generate_content(model=config.GEMINI_MODEL, contents=[prompt])
@@ -711,10 +674,7 @@ def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
                 f"Patterns: {parsed.get('patterns', 'None detected')} | "
                 f"Security: {parsed.get('security_concerns', 'None')}"
             )
-            archive_summary += f"
-
-AI Assessment:
-{ai_summary}"
+            archive_summary += f"\n\nAI Assessment:\n{ai_summary}"
 
         except Exception as exc:
             logger.warning(f"Archive AI summary failed: {exc}")
@@ -743,7 +703,7 @@ def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
     return {
         "summary": (
-            "Unrecognized file type — best-effort raw text extraction attempted."
+            "Unrecognized file type - best-effort raw text extraction attempted."
             if has_readable_text
             else "Unrecognized file type and no readable text could be extracted."
         ),
@@ -763,7 +723,7 @@ def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _parse_json_response(text: str) -> Dict[str, Any]:
-    """Gemini sometimes wraps JSON in markdown fences — strip those before parsing."""
+    """Gemini sometimes wraps JSON in markdown fences - strip those before parsing."""
     if not text:
         return {}
     cleaned = text.strip()
@@ -779,11 +739,11 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# Main endpoint
+# Core analysis function (used by both single and batch endpoints)
 # ---------------------------------------------------------------------------
 
-@app.post("/analyze", response_model=AnalyzeResponse)
-async def analyze(file: UploadFile = File(...)):
+async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
+    """Analyze a single file and return structured response."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided.")
 
@@ -819,7 +779,7 @@ async def analyze(file: UploadFile = File(...)):
         logger.exception("Unexpected error during analysis")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}")
 
-    response = AnalyzeResponse(
+    return SingleAnalyzeResponse(
         file_type=file_type,
         summary=result.get("summary", ""),
         analysis=AnalysisBlock(
@@ -840,4 +800,82 @@ async def analyze(file: UploadFile = File(...)):
         ),
     )
 
+
+# ---------------------------------------------------------------------------
+# Main endpoints
+# ---------------------------------------------------------------------------
+
+@app.post("/analyze", response_model=SingleAnalyzeResponse)
+async def analyze(file: UploadFile = File(...)):
+    """
+    Analyze a single file upload.
+
+    Accepts: images, documents, code files, ZIP archives
+    Returns: Structured JSON analysis
+    """
+    response = await analyze_single_file(file)
     return JSONResponse(content=response.model_dump())
+
+
+@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
+async def analyze_batch(files: List[UploadFile] = File(...)):
+    """
+    Analyze multiple files in a single request.
+
+    Each file is processed independently and results are returned as a batch.
+    If one file fails, the others still process.
+    """
+    results = []
+    successful = 0
+    failed = 0
+
+    for file in files:
+        try:
+            result = await analyze_single_file(file)
+            results.append(result)
+            successful += 1
+        except HTTPException as exc:
+            logger.warning(f"File '{file.filename}' failed: {exc.detail}")
+            results.append(SingleAnalyzeResponse(
+                file_type="error",
+                summary=f"Failed: {exc.detail}",
+                analysis=AnalysisBlock(
+                    description="",
+                    key_points=[],
+                    objects=[],
+                    text="",
+                    insights=[f"Error: {exc.detail}"],
+                ),
+                meta=MetaBlock(
+                    filename=file.filename or "unknown",
+                    size=0,
+                    mime_type="unknown",
+                ),
+            ))
+            failed += 1
+        except Exception as exc:
+            logger.exception(f"Unexpected error processing '{file.filename}': {exc}")
+            results.append(SingleAnalyzeResponse(
+                file_type="error",
+                summary=f"Unexpected error: {str(exc)}",
+                analysis=AnalysisBlock(
+                    description="",
+                    key_points=[],
+                    objects=[],
+                    text="",
+                    insights=[f"Critical error: {str(exc)}"],
+                ),
+                meta=MetaBlock(
+                    filename=file.filename or "unknown",
+                    size=0,
+                    mime_type="unknown",
+                ),
+            ))
+            failed += 1
+
+    return JSONResponse(content=BatchAnalyzeResponse(
+        results=results,
+        total_files=len(files),
+        successful=successful,
+        failed=failed,
+    ).model_dump())
