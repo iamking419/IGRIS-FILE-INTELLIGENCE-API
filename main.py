@@ -39,6 +39,12 @@ from pydantic import BaseModel
 import config
 
 # ---------------------------------------------------------------------------
+# Gemini constants (hardcoded - NOT in config.py)
+# ---------------------------------------------------------------------------
+GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
+GEMINI_VISION_MODEL = "gemini-3.5-flash"
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
@@ -50,7 +56,7 @@ logger = logging.getLogger("igris")
 
 logger.info(
     f"IGRIS v6.1 (Groq+Gemini) | Groq Model: {config.GROQ_MODEL} | "
-    f"Gemini Vision: {config.GEMINI_VISION_MODEL} | "
+    f"Gemini Vision: {GEMINI_VISION_MODEL} | "
     f"Tier: {config.SPEED_TIER} | Groq Keys: {len(config.GROQ_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
@@ -139,9 +145,6 @@ def _get_client_key(client) -> str:
 # ---------------------------------------------------------------------------
 # Gemini client for vision (IMAGES ONLY)
 # ---------------------------------------------------------------------------
-
-GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
-GEMINI_VISION_MODEL = "gemini-3.5-flash"
 
 _gemini_client: Any = None
 _gemini_lock = asyncio.Lock()
