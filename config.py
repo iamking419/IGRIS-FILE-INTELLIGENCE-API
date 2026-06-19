@@ -1,9 +1,9 @@
 """
-IGRIS AI Backend - Configuration Module v6.0 (Groq + Gemini Edition)
+IGRIS AI Backend - Configuration Module v6.1 (Groq + Gemini Edition)
 ====================================================================
 
 Multi-API key rotation + async batching + model tiering.
-Groq for text/docs/code. Gemini for vision/images.
+Groq for text/docs/code. Gemini for vision/images ONLY.
 
 Get Groq keys: https://console.groq.com/keys
 Get Gemini key: https://aistudio.google.com/app/apikey
@@ -16,23 +16,13 @@ import os
 # ---------------------------------------------------------------------------
 
 GROQ_API_KEYS = [
-    "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",
-    "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",
-    "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",
-    "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",
+    "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",  # Key 1
+    "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",  # Key 2
+    "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",  # Key 3
+    "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",  # Key 4
 ]
 
 MOCK_AI = ""
-
-# ---------------------------------------------------------------------------
-# GEMINI AI CONFIGURATION - VISION ONLY
-# ---------------------------------------------------------------------------
-
-# Your Gemini API key for image/vision analysis
-GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
-
-# Gemini vision model (native multimodal - can see images)
-GEMINI_VISION_MODEL = "gemini-3.5-flash"
 
 # ---------------------------------------------------------------------------
 # SPEED TIER SYSTEM
@@ -132,10 +122,6 @@ ENABLE_DETAILED_IMAGE_ANALYSIS = _resolve("ENABLE_DETAILED_IMAGE_ANALYSIS", ENAB
 ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE_PROCESSING, bool)
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
 
-# Resolve Gemini config
-GEMINI_API_KEY = _resolve("GEMINI_API_KEY", GEMINI_API_KEY)
-GEMINI_VISION_MODEL = _resolve("GEMINI_VISION_MODEL", GEMINI_VISION_MODEL)
-
 # ---------------------------------------------------------------------------
 # Speed Tier Model Selection - Groq Models
 # ---------------------------------------------------------------------------
@@ -193,16 +179,9 @@ elif MOCK_AI_RAW.lower() == "false":
 else:
     MOCK_AI = not bool(GROQ_API_KEYS)
 
-# Validate Groq
+# Validate
 if not MOCK_AI and not GROQ_API_KEYS:
     raise RuntimeError(
         "MOCK_AI is disabled but no GROQ_API_KEYS are set. "
         "Either add keys to GROQ_API_KEYS in config.py or set MOCK_AI='true'."
-    )
-
-# Validate Gemini (warn only - images will fallback to Groq text-only if no Gemini key)
-if not GEMINI_API_KEY and not MOCK_AI:
-    import logging
-    logging.getLogger("igris").warning(
-        "No GEMINI_API_KEY set. Image analysis will fall back to Groq text-only mode."
     )
