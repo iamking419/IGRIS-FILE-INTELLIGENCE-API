@@ -1,28 +1,27 @@
 """
-IGRIS AI Backend - Configuration Module v5.1 (Fixed for google-genai SDK)
-===========================================================================
+IGRIS AI Backend - Configuration Module v6.0 (Groq Edition)
+===========================================================
 
 Multi-API key rotation + async batching + model tiering.
-Works with NEW Google AI Studio API keys (AQ-prefixed).
+Works with Groq API keys from console.groq.com
 
-Get your API keys at: https://aistudio.google.com/app/apikey
+Get your API keys at: https://console.groq.com/keys
 """
 
 import os
 
 # ---------------------------------------------------------------------------
-# GEMINI AI CONFIGURATION - MULTI-KEY ROTATION
+# GROQ AI CONFIGURATION - MULTI-KEY ROTATION
 # ---------------------------------------------------------------------------
 
-# List of Google Gemini API keys for rotation.
-# Supports all formats: AIzaSy..., AQ..., etc.
+# List of Groq API keys for rotation.
 # Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
-# Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
-GEMINI_API_KEYS = [
-    "AQ.Ab8RN6JtlidJO2_gwSSj2-wLyE-dZ-GHJV7h038_b4LBFcohTA",  # Key 1
-    "AQ.Ab8RN6IqCvcWKT5n3qQd_VWlFAAF9NYaMpoLLK8MSKDfqem11w",  # Key 2
-    "AQ.Ab8RN6JxYC0nSYPsswOqzm5Mj9DK_AY-6hPCehwmrp2HHD2uQQ",  # Key 3
-    "AQ.Ab8RN6Lu2FpFK-XpAoii5MiOiyI-QHsAvYNHURXSYJPyLVJ4lw",  # Key 4
+# Leave empty [] to use env var GROQ_API_KEYS (comma-separated)
+GROQ_API_KEYS = [
+    "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",  # Key 1
+    "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",  # Key 2
+    "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",  # Key 3
+    "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",  # Key 4
 ]
 
 # Set to "true" to force mock mode (no real AI calls).
@@ -37,16 +36,15 @@ MOCK_AI = ""
 SPEED_TIER = "fastest"  # "fastest" | "fast" | "balanced" | "quality"
 
 # Override: Set specific model. Leave "" to use SPEED_TIER.
-GEMINI_MODEL = ""
+GROQ_MODEL = ""
 
 # ---------------------------------------------------------------------------
 # CONCURRENCY & PERFORMANCE
 # ---------------------------------------------------------------------------
 
-MAX_CONCURRENT_FILES = 5
-PARALLEL_ARCHIVE_PROCESSING = True
-AI_TIMEOUT = 15
-AGGRESSIVE_RETRY = True
+MAX_CONCURRENT_FILES = 3        # Keep low to respect Groq rate limits
+AI_TIMEOUT = 30                 # Seconds per API call
+AGGRESSIVE_RETRY = False        # Don't burn rate limits
 
 # ---------------------------------------------------------------------------
 # Server Configuration
@@ -107,7 +105,7 @@ def _resolve(name, default, type_func=str):
 
 MOCK_AI_RAW = _resolve("MOCK_AI", MOCK_AI)
 SPEED_TIER = _resolve("SPEED_TIER", SPEED_TIER)
-GEMINI_MODEL_OVERRIDE = _resolve("GEMINI_MODEL", GEMINI_MODEL)
+GROQ_MODEL_OVERRIDE = _resolve("GROQ_MODEL", GROQ_MODEL)
 HOST = _resolve("HOST", HOST)
 PORT = _resolve("PORT", PORT, int)
 RELOAD = _resolve("RELOAD", RELOAD, bool)
@@ -119,7 +117,6 @@ MAX_TEXT_LENGTH = _resolve("MAX_TEXT_LENGTH", MAX_TEXT_LENGTH, int)
 MAX_IMAGE_DIMENSION = _resolve("MAX_IMAGE_DIMENSION", MAX_IMAGE_DIMENSION, int)
 MAX_CONCURRENT_FILES = _resolve("MAX_CONCURRENT_FILES", MAX_CONCURRENT_FILES, int)
 AI_TIMEOUT = _resolve("AI_TIMEOUT", AI_TIMEOUT, int)
-PARALLEL_ARCHIVE_PROCESSING = _resolve("PARALLEL_ARCHIVE_PROCESSING", PARALLEL_ARCHIVE_PROCESSING, bool)
 AGGRESSIVE_RETRY = _resolve("AGGRESSIVE_RETRY", AGGRESSIVE_RETRY, bool)
 LOG_LEVEL = _resolve("LOG_LEVEL", LOG_LEVEL)
 LOG_FORMAT = _resolve("LOG_FORMAT", LOG_FORMAT)
@@ -132,36 +129,34 @@ ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
 
 # ---------------------------------------------------------------------------
-# Speed Tier Model Selection  -- FIXED: Real model names from AI Studio
+# Speed Tier Model Selection - Groq Models
 # ---------------------------------------------------------------------------
 
-# These are the ACTUAL model names available in Google AI Studio as of June 2026
+# Groq model IDs from console.groq.com/docs/models
 SPEED_TIER_MAP = {
-    "fastest": "gemini-2.5-flash",      # Fastest, cheapest
-    "fast": "gemini-2.5-flash",         # Fast
-    "balanced": "gemini-2.5-pro",       # Balanced quality/speed
-    "quality": "gemini-2.5-pro",        # Best quality
+    "fastest": "meta-llama/llama-4-scout-17b-16e-instruct",   # 750 TPS, cheapest
+    "fast": "meta-llama/llama-4-scout-17b-16e-instruct",      # Fast
+    "balanced": "llama-3.3-70b-versatile",                    # Balanced
+    "quality": "qwen/qwen3-32b",                              # Best quality
 }
 
-if GEMINI_MODEL_OVERRIDE:
-    GEMINI_MODEL = GEMINI_MODEL_OVERRIDE
+if GROQ_MODEL_OVERRIDE:
+    GROQ_MODEL = GROQ_MODEL_OVERRIDE
 elif SPEED_TIER in SPEED_TIER_MAP:
-    GEMINI_MODEL = SPEED_TIER_MAP[SPEED_TIER]
+    GROQ_MODEL = SPEED_TIER_MAP[SPEED_TIER]
 else:
-    GEMINI_MODEL = "gemini-2.5-flash"
+    GROQ_MODEL = "meta-llama/llama-4-scout-17b-16e-instruct"
 
 # ---------------------------------------------------------------------------
-# Multi-Key Resolution (FIXED: handles both list and string env vars)
+# Multi-Key Resolution
 # ---------------------------------------------------------------------------
 
-_env_keys_raw = os.getenv("GEMINI_API_KEYS", "").strip()
+_env_keys_raw = os.getenv("GROQ_API_KEYS", "").strip()
 if _env_keys_raw:
-    # Env var is a comma-separated string
-    GEMINI_API_KEYS = [k.strip() for k in _env_keys_raw.split(",") if k.strip()]
-# else: keep the list from file config
+    GROQ_API_KEYS = [k.strip() for k in _env_keys_raw.split(",") if k.strip()]
 
 # Filter empty keys
-GEMINI_API_KEYS = [k for k in GEMINI_API_KEYS if k.strip()]
+GROQ_API_KEYS = [k for k in GROQ_API_KEYS if k.strip()]
 
 # Rotation state
 _current_key_index = 0
@@ -169,22 +164,22 @@ _current_key_index = 0
 
 def get_next_api_key():
     global _current_key_index
-    if not GEMINI_API_KEYS:
+    if not GROQ_API_KEYS:
         return None
-    key = GEMINI_API_KEYS[_current_key_index % len(GEMINI_API_KEYS)]
-    _current_key_index = (_current_key_index + 1) % len(GEMINI_API_KEYS)
+    key = GROQ_API_KEYS[_current_key_index % len(GROQ_API_KEYS)]
+    _current_key_index = (_current_key_index + 1) % len(GROQ_API_KEYS)
     return key
 
 
 def get_random_api_key():
     import random
-    if not GEMINI_API_KEYS:
+    if not GROQ_API_KEYS:
         return None
-    return random.choice(GEMINI_API_KEYS)
+    return random.choice(GROQ_API_KEYS)
 
 
 # Backward compatibility
-GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else ""
+GROQ_API_KEY = GROQ_API_KEYS[0] if GROQ_API_KEYS else ""
 
 # Mock mode resolution
 if MOCK_AI_RAW.lower() == "true":
@@ -192,11 +187,11 @@ if MOCK_AI_RAW.lower() == "true":
 elif MOCK_AI_RAW.lower() == "false":
     MOCK_AI = False
 else:
-    MOCK_AI = not bool(GEMINI_API_KEYS)
+    MOCK_AI = not bool(GROQ_API_KEYS)
 
 # Validate
-if not MOCK_AI and not GEMINI_API_KEYS:
+if not MOCK_AI and not GROQ_API_KEYS:
     raise RuntimeError(
-        "MOCK_AI is disabled but no GEMINI_API_KEYS are set. "
-        "Either add keys to GEMINI_API_KEYS in config.py or set MOCK_AI='true'."
+        "MOCK_AI is disabled but no GROQ_API_KEYS are set. "
+        "Either add keys to GROQ_API_KEYS in config.py or set MOCK_AI='true'."
     )
