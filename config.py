@@ -1,9 +1,9 @@
 """
-IGRIS AI Backend - Configuration Module v5.0 (Final)
-=====================================================
+IGRIS AI Backend - Configuration Module v5.1 (Fixed for google-genai SDK)
+===========================================================================
 
 Multi-API key rotation + async batching + model tiering.
-Works with all Gemini API key formats including AQ-prefixed keys.
+Works with NEW Google AI Studio API keys (AQ-prefixed).
 
 Get your API keys at: https://aistudio.google.com/app/apikey
 """
@@ -19,10 +19,10 @@ import os
 # Add 3-4 keys here. If one hits rate limit, IGRIS auto-switches.
 # Leave empty [] to use env var GEMINI_API_KEYS (comma-separated)
 GEMINI_API_KEYS = [
-    "AQ.Ab8RN6JoAt3FOlAhDcHYeWs9sJuEwQKZnMD24IttrgOpKPiiuA",  # Key 1
-    "AQ.Ab8RN6KLVFj_giedIsslPhxBXXkBGm_v_n9cqGR1olEKRLNWTA",  # Key 2
-    "AIzaSyCIb8cy2vV0vJUJXCaT-0Wv15txOon1m5w",  # Key 3
-    "AQ.Ab8RN6Ldc4MWjDnY2E9BoiV_UgKUwfjJ4rVprOpBoJeUCDBwKw",  # Key 4
+    "AQ.Ab8RN6KLVFj_giedIsslPhxBXXkBGm_v_n9cqGR1olEKRLNWTA",  # Key 1
+    "AQ.Ab8RN6LQOpcKS2uqt6bGqKuNmLUpRWEqkprfkzNOMJH60A1iKA",  # Key 2
+    "AQ.Ab8RN6IWlTOvqVmeo_ptyQ540oODEymByu7MSmXD6j9MGFGqHg",  # Key 3
+    "AQ.Ab8RN6LJfMpgxQvjadoe1vY3LQHCghBLOgaqjG4SCtuQ7gkKSQ",  # Key 4
 ]
 
 # Set to "true" to force mock mode (no real AI calls).
@@ -132,14 +132,15 @@ ENABLE_ARCHIVE_PROCESSING = _resolve("ENABLE_ARCHIVE_PROCESSING", ENABLE_ARCHIVE
 ENABLE_SECURITY_SCAN = _resolve("ENABLE_SECURITY_SCAN", ENABLE_SECURITY_SCAN, bool)
 
 # ---------------------------------------------------------------------------
-# Speed Tier Model Selection
+# Speed Tier Model Selection  -- FIXED: Real model names from AI Studio
 # ---------------------------------------------------------------------------
 
+# These are the ACTUAL model names available in Google AI Studio as of June 2026
 SPEED_TIER_MAP = {
-    "fastest": "gemini-3-flash-preview",
-    "fast": "gemini-2.5-flash",
-    "balanced": "gemini-3.5-flash",
-    "quality": "gemini-3.1-pro-preview",
+    "fastest": "gemini-2.5-flash",      # Fastest, cheapest
+    "fast": "gemini-2.5-flash",         # Fast
+    "balanced": "gemini-2.5-pro",       # Balanced quality/speed
+    "quality": "gemini-2.5-pro",        # Best quality
 }
 
 if GEMINI_MODEL_OVERRIDE:
@@ -147,7 +148,7 @@ if GEMINI_MODEL_OVERRIDE:
 elif SPEED_TIER in SPEED_TIER_MAP:
     GEMINI_MODEL = SPEED_TIER_MAP[SPEED_TIER]
 else:
-    GEMINI_MODEL = "gemini-3-flash-preview"
+    GEMINI_MODEL = "gemini-2.5-flash"
 
 # ---------------------------------------------------------------------------
 # Multi-Key Resolution (FIXED: handles both list and string env vars)
