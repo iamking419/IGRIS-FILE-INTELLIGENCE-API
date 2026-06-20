@@ -54,7 +54,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 GEMINI_API_KEY = "AQ.Ab8RN6JArJidgmpk454n4cwyGEEx-t1632ParXWGF3L3IcSMAg"
-GEMINI_MODEL = "gemini-2.5-flash"  # Fast vision model. Alt: gemini-2.5-pro for max quality
+GEMINI_MODEL = "gemini-flash-lite-latest"  # Fast vision model. Alt: gemini-2.5-pro for max quality
 GEMINI_TIMEOUT = 45
 GEMINI_MAX_CONCURRENT = 2
 ENABLE_DETAILED_IMAGE_ANALYSIS = True  # Set False for faster, less detailed image analysis
