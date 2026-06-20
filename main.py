@@ -1,16 +1,16 @@
 """
-IGRIS AI Backend v6.1 (Groq + Gemini Edition) - SUPER FAST File Intelligence
-=============================================================================
+IGRIS AI Backend v6.1 (Groq + Gemini Vision) - SUPER FAST File Intelligence
+============================================================================
 
 Features:
-  - Groq: Multi-API key rotation for docs, code, archives, unknown files
-  - Gemini: Native vision for images ONLY (base64 multimodal input)
-  - Single /analyze endpoint — accepts ONE file upload
+  - Multi-API key rotation for Groq
+  - Gemini Vision for actual image analysis (google-genai SDK v2.9+)
   - Async concurrent batch processing
   - Speed tier system
   - Parallel archive extraction
   - 100MB file limit
   - Rate limit aware retry with exponential backoff
+  - Groq chat completions API (OpenAI-compatible)
 
 Uses: groq SDK (pip install groq), google-genai (pip install google-genai)
 Run: uvicorn main:app --host 0.0.0.0 --port 8000
@@ -26,7 +26,6 @@ import random
 import time
 import asyncio
 import base64
-import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass
@@ -39,10 +38,26 @@ from pydantic import BaseModel
 import config
 
 # ---------------------------------------------------------------------------
-# Gemini constants (hardcoded - NOT in config.py)
+# NEW: Google GenAI SDK (latest, replaces deprecated google-generativeai)
 # ---------------------------------------------------------------------------
-GEMINI_API_KEY = "AQ.Ab8RN6KgXIS7rD-PjveFHlgYZeNEpn3oD8_er8FwnG4H8TiWeA"
-GEMINI_VISION_MODEL = "gemini-3.5-flash"
+try:
+    from google import genai
+    from google.genai import types as genai_types
+    from google.genai import errors as genai_errors
+    _GENAI_AVAILABLE = True
+except ImportError:
+    _GENAI_AVAILABLE = False
+    logging.warning("google-genai not installed. Gemini vision will be unavailable. Run: pip install google-genai")
+
+# ---------------------------------------------------------------------------
+# HARDCODED GEMINI CONFIG — DO NOT TOUCH CONFIG.PY
+# ---------------------------------------------------------------------------
+
+GEMINI_API_KEY = "AQ.Ab8RN6LJfMpgxQvjadoe1vY3LQHCghBLOgaqjG4SCtuQ7gkKSQ"
+GEMINI_MODEL = "gemini-2.5-flash"  # Fast vision model. Alt: gemini-2.5-pro for max quality
+GEMINI_TIMEOUT = 45
+GEMINI_MAX_CONCURRENT = 2
+ENABLE_DETAILED_IMAGE_ANALYSIS = True  # Set False for faster, less detailed image analysis
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -55,9 +70,8 @@ logging.basicConfig(
 logger = logging.getLogger("igris")
 
 logger.info(
-    f"IGRIS v6.1 (Groq+Gemini) | Groq Model: {config.GROQ_MODEL} | "
-    f"Gemini Vision: {GEMINI_VISION_MODEL} | "
-    f"Tier: {config.SPEED_TIER} | Groq Keys: {len(config.GROQ_API_KEYS)} | "
+    f"IGRIS v6.1 (Groq + Gemini Vision) | Model: {config.GROQ_MODEL} | "
+    f"Tier: {config.SPEED_TIER} | Keys: {len(config.GROQ_API_KEYS)} | "
     f"Concurrent: {config.MAX_CONCURRENT_FILES}"
 )
 
@@ -141,87 +155,70 @@ def _get_client_key(client) -> str:
             return key
     return ""
 
-
 # ---------------------------------------------------------------------------
-# Gemini client for vision (IMAGES ONLY)
+# GEMINI VISION CLIENT — Hardcoded, no config.py dependency
 # ---------------------------------------------------------------------------
 
-_gemini_client: Any = None
+_gemini_client: Optional[Any] = None
 _gemini_lock = asyncio.Lock()
+_gemini_semaphore = asyncio.Semaphore(GEMINI_MAX_CONCURRENT)
+_gemini_failed = False
 
 
-async def get_gemini_client():
-    """Lazy-init Gemini client for vision tasks using NEW google-genai SDK."""
-    global _gemini_client
-    if config.MOCK_AI:
+async def _init_gemini_client() -> Optional[Any]:
+    """Initialize Gemini client with hardcoded key. Returns None on failure."""
+    global _gemini_client, _gemini_failed
+    
+    if _gemini_failed:
         return None
-
-    if _gemini_client is not None:
-        return _gemini_client
-
+    if not _GENAI_AVAILABLE:
+        logger.warning("google-genai SDK not available. Install with: pip install google-genai")
+        return None
+    
     async with _gemini_lock:
         if _gemini_client is not None:
             return _gemini_client
+        
         try:
-            from google import genai
+            # New SDK pattern: genai.Client(api_key=...)
             client = genai.Client(api_key=GEMINI_API_KEY)
             _gemini_client = client
-            logger.info("Initialized Gemini vision client (google-genai SDK)")
+            logger.info(f"Gemini client initialized | Model: {GEMINI_MODEL}")
             return client
         except Exception as exc:
             logger.error(f"Gemini client init failed: {exc}")
-            logger.error(traceback.format_exc())
+            _gemini_failed = True
             return None
 
 
-async def call_gemini_vision(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Call Gemini with actual image bytes for real vision analysis.
-
-    GEMINI IS ONLY USED FOR IMAGES. Nothing else touches Gemini.
-    """
-    client = await get_gemini_client()
-    if not client:
-        raise RuntimeError("Gemini client not available")
-
-    prompt_text = (
-        f"Analyze this image file named '{filename}'. "
-        "Provide a detailed analysis. Respond ONLY as JSON with these exact keys: "
-        "scene_description, objects_detected (array), text_ocr, "
-        "ui_interpretation, colors_dominant (array), composition, "
-        "mood_atmosphere, technical_quality, safety_flags (array). "
-        "No markdown, no preamble, just valid JSON."
-    )
-
-    try:
-        from google.genai import types
-
-        response = await asyncio.wait_for(
-            asyncio.get_event_loop().run_in_executor(
-                _executor,
-                lambda: client.models.generate_content(
-                    model=GEMINI_VISION_MODEL,
-                    contents=[
-                        prompt_text,
-                        types.Part.from_bytes(data=raw, mime_type=mime_type),
-                    ],
-                    config=types.GenerateContentConfig(
-                        temperature=0.3,
-                        max_output_tokens=4096,
-                    ),
-                )
-            ),
-            timeout=config.AI_TIMEOUT
+def _get_gemini_prompt(detailed: bool) -> str:
+    """Build the vision prompt for Gemini."""
+    if detailed:
+        return (
+            "Analyze this image in extreme detail. You are a computer vision expert. "
+            "Return ONLY a valid JSON object with these exact keys and no markdown:\n"
+            "{\n"
+            '  "scene_description": "detailed description of what is happening in the image",\n'
+            '  "objects_detected": ["list", "of", "detected", "objects"],\n'
+            '  "text_ocr": "any text visible in the image, transcribed exactly",\n'
+            '  "ui_interpretation": "if this is a UI/screenshot, describe the interface elements",\n'
+            '  "colors_dominant": ["#hexcolor1", "#hexcolor2"],\n'
+            '  "composition": "describe the visual composition, framing, perspective",\n'
+            '  "mood_atmosphere": "describe the mood, lighting, atmosphere",\n'
+            '  "technical_quality": "assess image quality, resolution, artifacts, blur",\n'
+            '  "safety_flags": ["any concerning content flags or empty array"]\n'
+            "}"
         )
-
-        parsed = _parse_json_response(response.text)
-        return parsed
-
-    except asyncio.TimeoutError:
-        raise RuntimeError("Gemini vision timeout")
-    except Exception as exc:
-        logger.error(f"Gemini vision error: {exc}")
-        logger.error(traceback.format_exc())
-        raise
+    else:
+        return (
+            "Describe this image concisely. Return ONLY valid JSON with no markdown:\n"
+            "{\n"
+            '  "description": "brief description",\n'
+            '  "objects": ["key", "objects"],\n'
+            '  "text": "any visible text",\n'
+            '  "insights": ["notable observation"]\n'
+            "}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +263,14 @@ class SingleAnalyzeResponse(BaseModel):
     meta: MetaBlock
 
 
+class BatchAnalyzeResponse(BaseModel):
+    results: List[SingleAnalyzeResponse]
+    total_files: int
+    successful: int
+    failed: int
+    total_time_ms: float
+
+
 # ---------------------------------------------------------------------------
 # FastAPI app
 # ---------------------------------------------------------------------------
@@ -293,13 +298,11 @@ def root():
         "status": "online",
         "mock_mode": config.MOCK_AI,
         "speed_tier": config.SPEED_TIER,
-        "groq_model": config.GROQ_MODEL,
-        "gemini_vision_model": GEMINI_VISION_MODEL,
-        "groq_keys_loaded": len(config.GROQ_API_KEYS),
-        "groq_keys_failed": len(_failed_keys),
-        "groq_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
-        "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
-        "gemini_scope": "images_only",
+        "model": config.GROQ_MODEL,
+        "api_keys_loaded": len(config.GROQ_API_KEYS),
+        "api_keys_failed": len(_failed_keys),
+        "gemini_available": _GENAI_AVAILABLE and not _gemini_failed,
+        "gemini_model": GEMINI_MODEL if _GENAI_AVAILABLE else None,
     }
 
 
@@ -308,13 +311,13 @@ def health():
     return {
         "status": "ok",
         "mock_mode": config.MOCK_AI,
-        "groq_model": config.GROQ_MODEL,
-        "gemini_vision_model": GEMINI_VISION_MODEL,
+        "model": config.GROQ_MODEL,
         "tier": config.SPEED_TIER,
-        "groq_keys_available": len(config.GROQ_API_KEYS),
-        "groq_keys_failed": len(_failed_keys),
-        "gemini_available": bool(GEMINI_API_KEY) and not config.MOCK_AI,
-        "gemini_scope": "images_only",
+        "api_keys_available": len(config.GROQ_API_KEYS),
+        "api_keys_failed": len(_failed_keys),
+        "api_keys_fail_counts": {k[:8]+"...": v for k, v in _key_fail_counts.items()},
+        "gemini_available": _GENAI_AVAILABLE and not _gemini_failed,
+        "gemini_model": GEMINI_MODEL if _GENAI_AVAILABLE else None,
     }
 
 
@@ -472,6 +475,7 @@ async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: flo
                 timeout=config.AI_TIMEOUT
             )
 
+            # Success! Reset fail count for this key
             if key and key in _key_fail_counts:
                 _key_fail_counts[key] = max(0, _key_fail_counts[key] - 1)
 
@@ -486,6 +490,7 @@ async def _call_groq_with_retry(messages: List[Dict[str, str]], temperature: flo
             error_str = str(exc).lower()
             last_error = exc
 
+            # Categorize the error
             if "429" in error_str or "rate limit" in error_str:
                 logger.warning(f"Rate limit on key {key_id} - backing off")
                 if key:
@@ -542,7 +547,7 @@ def _parse_json_response(text: str) -> Dict[str, Any]:
 
 
 def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Extract basic metadata from image bytes."""
+    """Extract basic metadata from image bytes since Groq doesn't support vision."""
     try:
         from PIL import Image
         img = Image.open(io.BytesIO(raw))
@@ -559,20 +564,105 @@ def _get_image_metadata(raw: bytes, mime_type: str) -> Dict[str, Any]:
 
 
 def _image_to_base64(raw: bytes, mime_type: str) -> str:
-    """Convert image to base64 data URI."""
+    """Convert image to base64 data URI for potential vision support."""
     b64 = base64.b64encode(raw).decode("utf-8")
     return f"data:{mime_type};base64,{b64}"
 
 
-# ==================== GEMINI VISION - IMAGES ONLY ====================
-# Gemini is ONLY used for image analysis. NOTHING else touches Gemini.
-# =====================================================================
+# =============================================================================
+# GEMINI VISION PIPELINE — The Real Deal
+# =============================================================================
+
+async def _call_gemini_vision(filename: str, raw: bytes, mime_type: str, detailed: bool) -> Optional[Dict[str, Any]]:
+    """
+    Call Gemini vision using the latest google-genai SDK.
+    Returns parsed dict or None on failure (falls back to Groq).
+    """
+    if not _GENAI_AVAILABLE:
+        return None
+    
+    client = await _init_gemini_client()
+    if not client:
+        return None
+    
+    async with _gemini_semaphore:
+        try:
+            prompt = _get_gemini_prompt(detailed)
+            
+            # New SDK v2.9+ pattern: types.Part.from_bytes(data=..., mime_type=...)
+            # contents can be a mixed list of text and parts
+            contents = [
+                prompt,
+                genai_types.Part.from_bytes(data=raw, mime_type=mime_type),
+            ]
+            
+            # Use async client via client.aio.models.generate_content
+            response = await asyncio.wait_for(
+                client.aio.models.generate_content(
+                    model=GEMINI_MODEL,
+                    contents=contents,
+                    config=genai_types.GenerateContentConfig(
+                        temperature=0.3,
+                        max_output_tokens=4096,
+                    ),
+                ),
+                timeout=GEMINI_TIMEOUT,
+            )
+            
+            text = response.text if hasattr(response, 'text') else str(response)
+            parsed = _parse_json_response(text)
+            
+            if detailed:
+                return {
+                    "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
+                    "description": parsed.get("scene_description", ""),
+                    "key_points": [],
+                    "objects": parsed.get("objects_detected", []),
+                    "text": parsed.get("text_ocr", ""),
+                    "insights": [
+                        f"UI: {parsed.get('ui_interpretation', 'N/A')}",
+                        f"Mood: {parsed.get('mood_atmosphere', 'N/A')}",
+                        f"Tech: {parsed.get('technical_quality', 'N/A')}",
+                    ] if any([parsed.get("ui_interpretation"), parsed.get("mood_atmosphere"), parsed.get("technical_quality")]) else [],
+                    "image_details": {
+                        "scene_description": parsed.get("scene_description", ""),
+                        "objects_detected": parsed.get("objects_detected", []),
+                        "text_ocr": parsed.get("text_ocr", ""),
+                        "ui_interpretation": parsed.get("ui_interpretation", ""),
+                        "colors_dominant": parsed.get("colors_dominant", []),
+                        "composition": parsed.get("composition", ""),
+                        "mood_atmosphere": parsed.get("mood_atmosphere", ""),
+                        "technical_quality": parsed.get("technical_quality", ""),
+                        "safety_flags": parsed.get("safety_flags", []),
+                    },
+                }
+            else:
+                return {
+                    "summary": parsed.get("description", "")[:280],
+                    "description": parsed.get("description", ""),
+                    "key_points": [],
+                    "objects": parsed.get("objects", []),
+                    "text": parsed.get("text", ""),
+                    "insights": parsed.get("insights", []),
+                }
+                
+        except asyncio.TimeoutError:
+            logger.warning("Gemini vision timeout, falling back to Groq metadata")
+            return None
+        except Exception as exc:
+            error_str = str(exc).lower()
+            logger.error(f"Gemini vision error: {exc}")
+            
+            # Check for auth/rate limit issues
+            if any(x in error_str for x in ["429", "rate limit", "quota", "403", "401", "invalid api key", "permission"]):
+                global _gemini_failed
+                _gemini_failed = True
+                logger.error("Gemini key permanently failed. Will use Groq fallback for images.")
+            
+            return None
+
 
 async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[str, Any]:
-    """Image pipeline: uses Gemini for real vision, falls back to Groq text-only if Gemini fails.
-
-    GEMINI IS ONLY CALLED HERE. No other pipeline uses Gemini.
-    """
     if config.MOCK_AI:
         return {
             "summary": "[MOCK] Image analyzed",
@@ -594,43 +684,18 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
             }
         }
 
-    # Try Gemini vision first (IMAGES ONLY)
-    if GEMINI_API_KEY:
-        try:
-            parsed = await call_gemini_vision(filename, raw, mime_type)
-            logger.info(f"Gemini vision success for '{filename}'")
-
-            return {
-                "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
-                "description": parsed.get("scene_description", ""),
-                "key_points": [],
-                "objects": parsed.get("objects_detected", []),
-                "text": parsed.get("text_ocr", ""),
-                "insights": [
-                    f"UI: {parsed.get('ui_interpretation', 'N/A')}",
-                    f"Mood: {parsed.get('mood_atmosphere', 'N/A')}",
-                    f"Tech: {parsed.get('technical_quality', 'N/A')}",
-                ] if any([parsed.get("ui_interpretation"), parsed.get("mood_atmosphere"), parsed.get("technical_quality")]) else [],
-                "image_details": {
-                    "scene_description": parsed.get("scene_description", ""),
-                    "objects_detected": parsed.get("objects_detected", []),
-                    "text_ocr": parsed.get("text_ocr", ""),
-                    "ui_interpretation": parsed.get("ui_interpretation", ""),
-                    "colors_dominant": parsed.get("colors_dominant", []),
-                    "composition": parsed.get("composition", ""),
-                    "mood_atmosphere": parsed.get("mood_atmosphere", ""),
-                    "technical_quality": parsed.get("technical_quality", ""),
-                    "safety_flags": parsed.get("safety_flags", []),
-                },
-            }
-        except Exception as exc:
-            logger.warning(f"Gemini vision failed for '{filename}', falling back to Groq: {exc}")
-            logger.warning(traceback.format_exc())
-
-    # Fallback: Groq text-only (metadata-based) - NEVER calls Gemini
+    # Try Gemini Vision FIRST — actual image understanding
+    detailed = ENABLE_DETAILED_IMAGE_ANALYSIS
+    gemini_result = await _call_gemini_vision(filename, raw, mime_type, detailed)
+    if gemini_result is not None:
+        logger.info(f"Gemini vision success for {filename}")
+        return gemini_result
+    
+    # FALLBACK: Groq metadata-only analysis (original behavior)
+    logger.info(f"Falling back to Groq metadata analysis for {filename}")
     metadata = _get_image_metadata(raw, mime_type)
 
-    if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
+    if detailed:
         prompt = (
             f"I have an image file named '{filename}' with these properties:\n"
             f"- Format: {metadata.get('format', 'unknown')}\n"
@@ -654,7 +719,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
     response = await _call_groq_with_retry(messages)
     parsed = _parse_json_response(response.choices[0].message.content)
 
-    if config.ENABLE_DETAILED_IMAGE_ANALYSIS:
+    if detailed:
         return {
             "summary": (parsed.get("scene_description", "")[:280] or f"Image: {filename}"),
             "description": parsed.get("scene_description", ""),
@@ -689,12 +754,7 @@ async def run_image_pipeline(filename: str, raw: bytes, mime_type: str) -> Dict[
         }
 
 
-# ==================== GROQ PIPELINES - EVERYTHING EXCEPT IMAGES ====================
-# All non-image files go through Groq. Gemini is NEVER called here.
-# ===================================================================================
-
 async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
-    """Document pipeline - uses Groq ONLY. Gemini is never called."""
     extracted_text = extract_document_text(filename, raw)
 
     if config.MOCK_AI:
@@ -727,7 +787,6 @@ async def run_document_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
-    """Code pipeline - uses Groq ONLY. Gemini is never called."""
     code_text = _extract_plain(raw)
     ext = os.path.splitext(filename.lower())[1].lstrip(".")
 
@@ -771,11 +830,6 @@ async def run_code_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
-    """Archive pipeline - uses Groq ONLY. Gemini is never called directly.
-
-    Note: If archive contains images, those inner images go through run_image_pipeline
-    which may use Gemini. But the archive analysis itself is Groq-only.
-    """
     if not config.ENABLE_ARCHIVE_PROCESSING:
         return {
             "summary": "Archive processing disabled",
@@ -849,11 +903,6 @@ async def run_archive_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
 
 
 async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
-    """Analyze a single file inside an archive.
-
-    Images inside archives MAY use Gemini (via run_image_pipeline).
-    Everything else uses Groq.
-    """
     result = {
         "filename": file_info.filename,
         "relative_path": file_info.relative_path,
@@ -864,7 +913,6 @@ async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
     }
     try:
         if file_info.file_type == "image":
-            # This MAY call Gemini for real vision
             img = await run_image_pipeline(file_info.filename, file_info.raw, file_info.mime_type)
             result["analysis"] = {"summary": img.get("summary", ""), "description": img.get("description", ""),
                                    "objects": img.get("objects", []), "text": img.get("text", "")}
@@ -886,7 +934,6 @@ async def analyze_archive_file(file_info: ExtractedFile) -> Dict[str, Any]:
 
 
 async def run_unknown_pipeline(filename: str, raw: bytes) -> Dict[str, Any]:
-    """Unknown file pipeline - uses Groq ONLY. Gemini is never called."""
     text = _extract_plain(raw)
     has_text = bool(text.strip())
     return {
@@ -920,19 +967,14 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
     try:
         if file_type == "image":
-            # ONLY images may use Gemini
             result = await run_image_pipeline(file.filename, raw, mime_type)
         elif file_type == "document":
-            # Groq only
             result = await run_document_pipeline(file.filename, raw)
         elif file_type == "code":
-            # Groq only
             result = await run_code_pipeline(file.filename, raw)
         elif file_type == "archive":
-            # Groq only (inner images may use Gemini via analyze_archive_file)
             result = await run_archive_pipeline(file.filename, raw)
         else:
-            # Groq only
             result = await run_unknown_pipeline(file.filename, raw)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
@@ -966,24 +1008,60 @@ async def analyze_single_file(file: UploadFile) -> SingleAnalyzeResponse:
 
 
 # ---------------------------------------------------------------------------
-# SINGLE FILE ENDPOINT: /analyze (ONE file only)
+# Semaphore for concurrent control
+# ---------------------------------------------------------------------------
+
+_analysis_semaphore = asyncio.Semaphore(config.MAX_CONCURRENT_FILES)
+
+
+async def analyze_single_file_limited(file: UploadFile) -> SingleAnalyzeResponse:
+    async with _analysis_semaphore:
+        return await analyze_single_file(file)
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
 # ---------------------------------------------------------------------------
 
 @app.post("/analyze", response_model=SingleAnalyzeResponse)
-async def analyze(
-    file: UploadFile = File(
-        ...,
-        description="Upload a single file to analyze. Supports images, documents, code, and archives.",
-    )
-):
-    """
-    Analyze a single file.
-
-    Supported file types:
-    - **Images**: .jpg, .jpeg, .png, .webp, .gif, .bmp, .tiff, .ico (uses Gemini vision)
-    - **Documents**: .pdf, .docx, .txt, .md, .rtf, .doc, .odt (uses Groq)
-    - **Code**: .py, .js, .html, .css, .java, .cpp, .go, .rs, and 100+ more (uses Groq)
-    - **Archives**: .zip (extracts and analyzes contents, uses Groq + Gemini for inner images)
-    """
+async def analyze(file: UploadFile = File(...)):
+    """Analyze a single file."""
     response = await analyze_single_file(file)
     return JSONResponse(content=response.model_dump())
+
+
+@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
+async def analyze_batch(files: List[UploadFile] = File(...)):
+    """Analyze multiple files concurrently."""
+    start = time.time()
+
+    tasks = [analyze_single_file_limited(file) for file in files]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    processed = []
+    successful = 0
+    failed = 0
+
+    for i, result in enumerate(results):
+        if isinstance(result, Exception):
+            failed += 1
+            fname = files[i].filename if i < len(files) else "unknown"
+            processed.append(SingleAnalyzeResponse(
+                file_type="error",
+                summary=f"Error: {str(result)}",
+                analysis=AnalysisBlock(insights=[f"Failed: {str(result)}"]),
+                meta=MetaBlock(filename=fname, size=0, mime_type="error"),
+            ))
+        else:
+            successful += 1
+            processed.append(result)
+
+    total_time = (time.time() - start) * 1000
+
+    return JSONResponse(content=BatchAnalyzeResponse(
+        results=processed,
+        total_files=len(files),
+        successful=successful,
+        failed=failed,
+        total_time_ms=round(total_time, 2),
+    ).model_dump())
