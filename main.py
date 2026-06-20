@@ -53,7 +53,8 @@ except ImportError:
 # HARDCODED GEMINI CONFIG — DO NOT TOUCH CONFIG.PY
 # ---------------------------------------------------------------------------
 
-GEMINI_API_KEY = "AQ.Ab8RN6KmJeyNp5oFoM0Q66NVloHvNMyevIs3u6wdFeZIfGfjbw"
+
+GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GEMINI_MODEL = "gemini-flash-lite-latest"  # Fast vision model. Alt: gemini-2.5-pro for max quality
 GEMINI_TIMEOUT = 45
 GEMINI_MAX_CONCURRENT = 2
