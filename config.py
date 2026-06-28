@@ -16,10 +16,10 @@ import os
 # ---------------------------------------------------------------------------
 
 GROQ_API_KEYS = [
-    "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",  # Key 1
-    "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",  # Key 2
-    "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",  # Key 3
-    "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",  # Key 4
+    "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",  # Key 1
+    "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",  # Key 2
+    "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",  # Key 3
+    "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",  # Key 4
 ]
 
 MOCK_AI = ""
